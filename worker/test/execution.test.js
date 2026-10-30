@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import { configuration } from '../src/index.js';
 import { fixture, resultBody } from './helpers.js';
 
-test('execution fails closed when omitted and rejects typos', t => {
+test('execution fails closed when omitted or mistyped without breaking configuration', t => {
   const f = fixture(t);
   const env = { ...f.env };
   delete env.TASK_EXECUTION;
   assert.equal(configuration(env).execution, 'paused');
   for (const value of ['', 'true', 'enable', 'Enabled']) {
-    assert.throws(() => configuration({ ...env, TASK_EXECUTION: value }), /TASK_EXECUTION/);
+    assert.equal(configuration({ ...env, TASK_EXECUTION: value }).execution, 'paused');
   }
 });
 
@@ -26,8 +26,8 @@ test('pause blocks every model command without dispatching, creating tasks or ch
   assert.equal(await f.store.getConversation('owner/app', 'do'), null);
 });
 
-test('controls work while paused and model overrides cannot enable execution', async t => {
-  const f = fixture(t, { TASK_EXECUTION: 'paused' });
+test('controls work even with a mistyped pause setting and model overrides cannot enable execution', async t => {
+  const f = fixture(t, { TASK_EXECUTION: 'enable' });
   await f.webhook('/model expensive/model');
   await f.webhook('/model default');
   await f.webhook('/use docs');
@@ -65,6 +65,11 @@ test('pause retains in-flight results and session archives; explicit enabling re
     run_id: 1, run_url: 'https://github.com/owner/app/actions/runs/1'
   });
   f.config.execution = 'paused';
+  // The trusted publisher can read a running task, but a second agent cannot start it.
+  assert.equal((await f.api('GET', `/api/tasks/${task.id}`)).status, 200);
+  assert.equal((await f.api('POST', `/api/tasks/${task.id}/started`, {
+    run_id: 2, run_url: 'https://github.com/owner/app/actions/runs/2'
+  })).status, 503);
   assert.equal((await f.api('POST', `/api/tasks/${task.id}/result`, resultBody({
     session_id: 'persistent-session', session: btoa('saved transcript')
   }))).status, 204);

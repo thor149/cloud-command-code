@@ -45,8 +45,14 @@ Until those gates pass, keep AI tasks paused and report the deployment as a safe
 
 ## Release evidence
 
-The final Worker code is commit `b90c1162b122a794c271f3b7d78aac7e6e674aaf`, deployed as version `cf63bd1d-2265-4b12-9889-b45a4e1cd5fa`. The change also blocks replay of completed task IDs while paused. The Worker suite passes 78 tests. Linux CI passed all 68 Python tests and ShellCheck for the initial safety change; the subsequent replay guard changes only the Worker.
+The earlier replay-guard rollout used commit `b90c1162b122a794c271f3b7d78aac7e6e674aaf`, deployed as version `cf63bd1d-2265-4b12-9889-b45a4e1cd5fa`. The change also blocks replay of completed task IDs while paused. The Worker suite passes 78 tests. Linux CI passed all 68 Python tests and ShellCheck for the initial safety change; subsequent execution-gate changes affect only the Worker.
 
 Live Telegram `/status` showed `AI execution paused (no new model work)`. A live `/ask Verify the execution pause` received the pause notice. D1 retained three tasks, zero active tasks and the same session, and no agent workflow was dispatched. Automated regression tests cover queued-runner rejection, completed-task replay, owner checks, isolated branches and session continuity; no new live inference, edit, private clone or push was attempted with the exhausted budget.
 
 [Draft PR](https://github.com/thor149/cloud-command-code/pull/1) contains the implementation; main remains unchanged. The SQL backup was successfully restored into an in-memory database with all three tasks, and the gzip session archive contains three regular relative files. Neither backup is published in the PR.
+
+## Zed Student review follow-up
+
+The owner authorized using the open Zed editor. The GUI confirmed the Student plan, and one bounded read-only review ran through the built-in Zed Agent using its included allowance. No external-agent API credentials, paid credit packs or plan changes were used. [Official Zed documentation](https://zed.dev/docs/account/plans-and-pricing) caps Student usage at its included $10/month; [the education offer](https://zed.dev/education) lasts one year. This is useful development capacity, not an established permanent hosting or Command Code API entitlement.
+
+The review identified an availability weakness: throwing for a mistyped `TASK_EXECUTION` value also disabled owner commands and result callbacks. The follow-up treats every value except exact `enabled` as `paused`, preserving recovery and session writes without permitting model work. Tests cover malformed settings, working controls and the running-task GET-200/started-503 combination needed to preserve publisher access while refusing agent replay. The review's stale-queue concern was checked against the existing cron expiry; the workflow's fetch failure prevents its agent step from running. No inference bypass was established by the review.

@@ -4,7 +4,7 @@ Run [Command Code](https://commandcode.ai) on your repositories from a private T
 
 There is no always-on server. The Worker uses D1 for task metadata and KV for resumable Command Code sessions. The existing [self-hosted VM mode](#self-hosted-vm-mode) is also supported.
 
-**Deployment defaults to paused AI execution.** `TASK_EXECUTION: "paused"` keeps owner controls available but refuses `/ask`, `/plan`, `/do` and plain-text prompts before dispatch. Missing configuration also pauses execution. After verifying model access, hosting costs and spending limits, an operator can set `TASK_EXECUTION: "enabled"` in `worker/wrangler.jsonc` and redeploy. Telegram `/model` cannot lift the pause. Existing sessions and branches are retained; already-running model processes must be stopped separately. This switch prevents new AI work, not charges from an existing VM or other services. See [the phone-only architecture assessment](docs/PHONE_ONLY_ARCHITECTURE.md).
+**Deployment defaults to paused AI execution.** `TASK_EXECUTION: "paused"` keeps owner controls available but refuses `/ask`, `/plan`, `/do` and plain-text prompts before dispatch. Missing or unrecognized configuration also pauses execution without disabling controls or result callbacks. After verifying model access, hosting costs and spending limits, an operator can set `TASK_EXECUTION: "enabled"` in `worker/wrangler.jsonc` and redeploy. Telegram `/model` cannot lift the pause. Existing sessions and branches are retained; already-running model processes must be stopped separately. This switch prevents new AI work, not charges from an existing VM or other services. See [the phone-only architecture assessment](docs/PHONE_ONLY_ARCHITECTURE.md).
 
 ```text
 Your private Telegram chat
