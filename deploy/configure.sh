@@ -195,7 +195,7 @@ cmd_add_repo() {
   if [[ $url =~ ^git@github\.com:(.+)$ ]]; then
     key=$BOT_HOME/.ssh/deploy_$name
     if [[ ! -f $key ]]; then
-      runuser -u "$BOT_USER" -- ssh-keygen -q -t ed25519 -N '' -C "ccbot-$name@$(hostname)" -f "$key"
+      runuser -u "$BOT_USER" -- env -C "$BOT_HOME" ssh-keygen -q -t ed25519 -N '' -C "ccbot-$name@$(hostname)" -f "$key"
     fi
     ensure_ssh_alias "$name" "$key"
     ensure_github_host_key
@@ -215,10 +215,10 @@ cmd_add_repo() {
     echo "$dest already exists; reusing it."
   else
     # No terminal prompts: a private https URL fails fast instead of waiting for a username.
-    runuser -u "$BOT_USER" -- env GIT_TERMINAL_PROMPT=0 git clone "$clone_url" "$dest"
+    runuser -u "$BOT_USER" -- env -C "$BOT_HOME" GIT_TERMINAL_PROMPT=0 git clone "$clone_url" "$dest"
   fi
   if [[ -z $base ]]; then
-    head="$(runuser -u "$BOT_USER" -- git -C "$dest" symbolic-ref --quiet --short refs/remotes/origin/HEAD || true)"
+    head="$(runuser -u "$BOT_USER" -- env -C "$BOT_HOME" git -C "$dest" symbolic-ref --quiet --short refs/remotes/origin/HEAD || true)"
     base=${head#origin/}
     base=${base:-main}
   fi

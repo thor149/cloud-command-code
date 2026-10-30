@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import os
 import shutil
 import subprocess
 import tempfile
@@ -313,6 +314,47 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         update = owner_update()
         await send_result(update, RunResult(3, "nope"))
         self.assertIn("not authenticated", replies(update)[0])
+
+
+@unittest.skipUnless(os.name == "posix", "process-group handling is POSIX-only")
+class RealProcessTests(unittest.IsolatedAsyncioTestCase):
+    """Runs run_headless against a real executable that imitates Command Code."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.marker = self.tmp / "child.pid"
+
+    def fake_cli(self, body: str) -> str:
+        script = self.tmp / "fake-cmd"
+        script.write_text("#!/bin/sh\n" + body)
+        script.chmod(0o755)
+        return str(script)
+
+    def child_alive(self) -> bool:
+        pid = int(self.marker.read_text())
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return Path(f"/proc/{pid}/stat").exists() and Path(f"/proc/{pid}/stat").read_text().split()[2] != "Z"
+
+    async def test_background_child_holding_stdout_is_killed_after_exit(self):
+        result_line = json.dumps({"type": "result", "subtype": "success", "sessionId": "s", "finalText": "done"})
+        cli = self.fake_cli(f"sleep 300 &\necho $! > {self.marker}\necho '{result_line}'\nexit 0\n")
+        with patch("commandcode_bot.runner.DRAIN_GRACE_SECONDS", 0.5):
+            result = await asyncio.wait_for(run_headless(cli, self.tmp, "x", 30), 20)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.output, "done")
+        await asyncio.sleep(0.2)
+        self.assertFalse(self.child_alive())
+
+    async def test_timeout_kills_the_whole_group(self):
+        cli = self.fake_cli(f"sleep 300 &\necho $! > {self.marker}\nsleep 300\n")
+        result = await asyncio.wait_for(run_headless(cli, self.tmp, "x", 1), 20)
+        self.assertTrue(result.timed_out)
+        await asyncio.sleep(0.2)
+        self.assertFalse(self.child_alive())
 
 
 class GitOpsTests(unittest.TestCase):

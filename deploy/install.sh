@@ -56,9 +56,9 @@ install -d -m 750 -o root -g "$BOT_USER" "$CONF_DIR"
 # the root-owned settings.json.
 install -d -m 3770 -o root -g "$BOT_USER" "$BOT_HOME/.commandcode"
 install -m 644 -o root -g "$BOT_USER" "$SRC_DIR/deploy/commandcode-policy.json" "$BOT_HOME/.commandcode/settings.json"
-runuser -u "$BOT_USER" -- git config --global user.name "Cloud Command Code"
-runuser -u "$BOT_USER" -- git config --global user.email "ccbot@localhost"
-runuser -u "$BOT_USER" -- git config --global init.defaultBranch main
+runuser -u "$BOT_USER" -- env -C "$BOT_HOME" git config --global user.name "Cloud Command Code"
+runuser -u "$BOT_USER" -- env -C "$BOT_HOME" git config --global user.email "ccbot@localhost"
+runuser -u "$BOT_USER" -- env -C "$BOT_HOME" git config --global init.defaultBranch main
 
 log "Swap (small VMs)"
 total_mb="$(awk '/MemTotal/ {print int($2 / 1024)}' /proc/meminfo)"
