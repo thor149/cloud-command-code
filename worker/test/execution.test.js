@@ -77,3 +77,18 @@ test('pause retains in-flight results and session archives; explicit enabling re
   assert.equal(payload.session_id, 'persistent-session');
   assert.equal(payload.session, btoa('saved transcript'));
 });
+
+test('a manually re-run completed workflow cannot bypass pause using an old task id', async t => {
+  const f = fixture(t);
+  await f.webhook('/ask old');
+  const task = f.dispatches[0];
+  await f.api('POST', `/api/tasks/${task.id}/result`, resultBody());
+  f.config.execution = 'paused';
+  assert.equal((await f.api('GET', `/api/tasks/${task.id}`)).status, 503);
+  assert.equal((await f.api('POST', `/api/tasks/${task.id}/started`, {
+    run_id: 2, run_url: 'https://github.com/owner/app/actions/runs/2'
+  })).status, 503);
+  // Duplicate results may still be acknowledged; no model work follows that callback.
+  assert.equal((await f.api('POST', `/api/tasks/${task.id}/result`, resultBody())).status, 204);
+  assert.equal((await f.store.task(task.id)).status, 'done');
+});

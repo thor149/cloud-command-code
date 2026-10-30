@@ -76,9 +76,9 @@ export async function handleApi(request, deps) {
   const action = match[2];
   if (!action && request.method === 'GET') {
     if (task.status === 'cancelled') return json({ error: 'Cancelled' }, 410);
-    // Also protect tasks dispatched before the pause. Completed tasks remain readable for
-    // the trusted publisher; in-flight callbacks can still save results and session archives.
-    if (deps.config.execution !== 'enabled' && task.status === 'queued') return json({ error: PAUSED_MESSAGE }, 503);
+    // Only an in-flight publisher may still need a task after pause. Do not hand out
+    // queued or terminal tasks that a manually re-run workflow could execute again.
+    if (deps.config.execution !== 'enabled' && !['running', 'finishing'].includes(task.status)) return json({ error: PAUSED_MESSAGE }, 503);
     const conv = await store.getConversation(task.repo, conversationKind(task.kind));
     let session;
     try { session = await store.getSession(task, conv); }
@@ -89,13 +89,15 @@ export async function handleApi(request, deps) {
       edit_mode: task.edit_mode, timeout_minutes: task.timeout_minutes });
   }
   if (!action || request.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
+  // Check before terminal-task idempotency: replaying an old /started must not look
+  // successful to a runner while execution is paused.
+  if (action === 'started' && deps.config.execution !== 'enabled') return json({ error: PAUSED_MESSAGE }, 503);
   // Ignore duplicate terminal results even if a retry's JSON is damaged.
   if (!isActive(task)) return noContent();
   if (action === 'result' && task.status === 'finishing') return json({ error: 'Result is being saved; retry' }, 503);
   let body;
   try { body = JSON.parse(new TextDecoder().decode(bytes)); } catch { return json({ error: 'Invalid JSON' }, 400); }
   if (action === 'started') {
-    if (deps.config.execution !== 'enabled') return json({ error: PAUSED_MESSAGE }, 503);
     if (!body || !Number.isSafeInteger(body.run_id) || body.run_id <= 0 || typeof body.run_url !== 'string'
       || body.run_url !== `https://github.com/${task.repo}/actions/runs/${body.run_id}`) return json({ error: 'Invalid run' }, 400);
     const started = await store.startTask(task.id, body, now());
