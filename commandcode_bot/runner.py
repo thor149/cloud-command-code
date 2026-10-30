@@ -69,10 +69,11 @@ def command_args(
     if edit:
         if edit_mode not in EDIT_MODES:
             raise ValueError(f"edit_mode must be one of {EDIT_MODES}")
-        # "edits": fail-closed allowlist (file edits only, from the worktree's bot-written settings).
-        # "full": bypass prompts; global deny rules still apply.
-        args += ["--yolo"] if edit_mode == "full" else ["--permission-mode", "dont-ask"]
-        args += ["--max-turns", str(EDIT_MAX_TURNS)]
+        # Headless Command Code refuses every file edit unless launched with --yolo (verified against
+        # 1.54: dont-ask plus allow rules still blocks edit_file). What the agent may actually do is set by
+        # deny rules, which hold even in --yolo: in "edits" mode the worktree's bot-written settings deny
+        # Shell and web access; in "full" mode only the global deny policy applies.
+        args += ["--yolo", "--max-turns", str(EDIT_MAX_TURNS)]
     else:
         args += ["--permission-mode", "plan", "--max-turns", str(PLAN_MAX_TURNS)]
     if session_id:

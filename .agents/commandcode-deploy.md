@@ -121,3 +121,6 @@ gcloud compute ssh ccbot --project <project> --zone us-central1-a
 - If blocked, append BLOCKED with the reason instead of guessing.
 
 ## Log
+- 2026-10-30 (Claude): The Command Code desktop app could not be driven (Windows lock screen), so Claude
+  implemented this brief directly. Command Code (CLI, DeepSeek V4.1 Flash, effort max, plan mode) reviewed the
+  result instead: 24 findings, all critical/high ones fixed in commit 2ebf9b8 and later.

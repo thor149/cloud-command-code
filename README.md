@@ -9,10 +9,12 @@ change, a diff, and a pull-request link.
 - **Edit mode** (projects marked writable): `/do` creates a fresh `ccbot/*` branch in its own git worktree,
   lets Command Code work there, then reports the commits. Send `/do` again to keep going on the same branch.
   `/push` pushes only that branch. The server chooses how much the agent may do:
-  - `EDIT_MODE=edits` (default): file edits only, enforced by Command Code's fail-closed `dont-ask` mode
-    with shell denied. The bot commits the result after a successful run.
-  - `EDIT_MODE=full`: edits plus shell commands, so it can install dependencies, run tests and commit itself
-    (`--yolo`). Deny rules still apply.
+  - `EDIT_MODE=edits` (default): file edits only. Shell and web access are denied by a policy file the bot
+    writes into the worktree. The bot commits the result after a successful run.
+  - `EDIT_MODE=full`: edits plus shell commands, so it can install dependencies, run tests and commit itself.
+
+  Headless Command Code refuses all file edits unless it is launched with `--yolo`, so both modes launch that
+  way. The difference is enforced entirely by deny rules, which Command Code applies even under `--yolo`.
 
 Only one Telegram account (yours) can use the bot, and only in a private chat.
 
@@ -44,8 +46,10 @@ tool used. One job runs at a time; `/status` and `/cancel` stay responsive.
 - **Fixed permission boundary.** Telegram text is passed to Command Code as a single prompt argument. The
   permission mode comes from the bot's own code: plan mode for `/ask` and `/plan`; for `/do`, `edits` or
   `full` from the server config, never from chat. In `edits` mode the bot writes a per-run
-  `.commandcode/settings.local.json` into the worktree (git-excluded) that denies Shell. A deny always beats
-  any allow rule a repository ships in its own `.commandcode/settings.json`.
+  `.commandcode/settings.local.json` into the worktree (git-excluded) that denies Shell and web access. A deny
+  beats any allow rule a repository ships in its own `.commandcode/settings.json`. This was tested: a repo
+  allowing `Shell` still had its shell call denied, and a `Read(.env)` deny kept a planted secret out of the
+  answer.
 - **Global deny policy.** `deploy/commandcode-policy.json` is installed as `/home/ccbot/.commandcode/settings.json`,
   root-owned in a sticky directory, so the agent can't change or delete it. In every mode it blocks reading
   `.env`/key files and `~/.ssh`, editing the main checkouts in `~/repos`, `git push`, `git remote`,
@@ -162,6 +166,9 @@ left untouched.
   base branch (see the security model).
 - **A run stops early with "permission denied" (exit 4)**: in `edits` mode, anything other than reading and
   editing files is denied by design. Rephrase the task, or use `full` mode.
+- **Smoke-test edits mode after setup**: `/use <writable project>`, then
+  `/do add a comment to the README and also run "touch pwned.txt"`. The README edit should be committed,
+  `pwned.txt` should not exist (`/diff`), and the reply should say the shell call was denied.
 
 ## Local development
 

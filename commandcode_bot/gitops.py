@@ -126,9 +126,10 @@ def remove_task(repo: Path, worktree: Path, branch: str) -> None:
 
 
 AGENT_SETTINGS = Path(".commandcode") / "settings.local.json"
+# Deny beats every allow, from any settings file, even under --yolo. Verified: with a repository
+# shipping allow ["Shell"], this deny still blocked the shell tool and a Read(.env) deny blocked the read.
 EDITS_ONLY_POLICY = {
     "permissions": {
-        "defaultMode": "dont-ask",
         "allow": ["Edit(**)", "Write(**)"],
         "deny": ["Shell", "WebFetch", "WebSearch", "mcp__*"],
     }

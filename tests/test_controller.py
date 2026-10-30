@@ -105,13 +105,12 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(args.count(prompt), 1)
 
     def test_edit_arguments_follow_configured_mode_only(self):
-        edits = command_args("cmd", "fix it", edit=True)
-        self.assertEqual(edits[edits.index("--permission-mode") + 1], "dont-ask")
-        self.assertNotIn("--yolo", edits)
-        self.assertNotIn("--tools-all", edits)
-        full = command_args("cmd", "fix it", edit=True, edit_mode="full")
-        self.assertIn("--yolo", full)
-        self.assertNotIn("--permission-mode", full)
+        # Headless edits need --yolo; the edit mode is enforced by the worktree's deny policy instead.
+        for mode in ("edits", "full"):
+            args = command_args("cmd", "fix it", edit=True, edit_mode=mode)
+            self.assertIn("--yolo", args)
+            self.assertNotIn("--tools-all", args)
+            self.assertNotIn("plan", args)
         with self.assertRaises(ValueError):
             command_args("cmd", "x", edit=True, edit_mode="anything")
 
@@ -382,8 +381,8 @@ class GitOpsTests(unittest.TestCase):
         created = gitops.create_task_worktree(self.repo, "main", self.tmp / "wt", "app", "task")
         gitops.prepare_agent_settings(created.path, "edits")
         policy = json.loads((created.path / gitops.AGENT_SETTINGS).read_text())
-        self.assertEqual(policy["permissions"]["defaultMode"], "dont-ask")
         self.assertIn("Shell", policy["permissions"]["deny"])
+        self.assertIn("WebFetch", policy["permissions"]["deny"])
         self.assertIsNone(gitops.commit_all(created.path, "ccbot: nothing"))  # excluded, so tree is clean
         gitops.prepare_agent_settings(created.path, "edits")  # idempotent exclude entry
         exclude = Path(gitops.git(created.path, "rev-parse", "--path-format=absolute", "--git-common-dir")) / "info" / "exclude"
