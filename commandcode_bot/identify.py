@@ -2,12 +2,15 @@
 
 import asyncio
 import getpass
+import os
 
 from telegram import Bot
 
 
 async def identify() -> None:
-    token = getpass.getpass("Paste the BotFather token (input is hidden): ").strip()
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    if not token:
+        token = getpass.getpass("Paste the BotFather token (input is hidden): ").strip()
     if not token:
         raise SystemExit("No token supplied.")
     async with Bot(token) as bot:

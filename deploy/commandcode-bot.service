@@ -1,23 +1,35 @@
 [Unit]
-Description=Private Telegram Command Code controller
+Description=Cloud Command Code (private Telegram controller for Command Code)
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=simple
-User=ubuntu
-Group=ubuntu
-WorkingDirectory=/home/ubuntu/commandcode-bot
-EnvironmentFile=/home/ubuntu/commandcode-bot/.env
-ExecStart=/home/ubuntu/commandcode-bot/.venv/bin/python -m commandcode_bot.bot
+User=ccbot
+Group=ccbot
+WorkingDirectory=/opt/commandcode-bot
+EnvironmentFile=/etc/commandcode-bot/env
+Environment=HOME=/home/ccbot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/commandcode-bot/.venv/bin/python -m commandcode_bot.bot
+StateDirectory=commandcode-bot
+StateDirectoryMode=0700
 Restart=on-failure
 RestartSec=5
+KillMode=control-group
+TimeoutStopSec=30
+
+# Hardening: the agent can write only to the bot user's home (repos, worktrees, caches) and its state.
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=full
-ProtectHome=false
+ProtectSystem=strict
+ReadWritePaths=/home/ccbot /var/lib/commandcode-bot
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
 UMask=0077
 
 [Install]
 WantedBy=multi-user.target
-

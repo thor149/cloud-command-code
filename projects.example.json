@@ -1,4 +1,4 @@
 {
-  "hirable": "/home/ubuntu/workspace/hirable"
+  "hirable": {"path": "/home/ccbot/repos/hirable", "writable": true, "base": "main"},
+  "notes": "/home/ccbot/repos/notes"
 }
-
