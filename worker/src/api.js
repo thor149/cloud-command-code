@@ -2,7 +2,8 @@ import { verify } from './auth.js';
 import { conversationKind, isActive } from './store.js';
 
 export const MAX_SESSION_BYTES = 20 * 1024 * 1024;
-const MAX_BODY_BYTES = Math.ceil(MAX_SESSION_BYTES / 3) * 4 + 400000;
+// Two 60,000-code-point strings can each use 12 JSON bytes per escaped surrogate pair.
+const MAX_BODY_BYTES = Math.ceil(MAX_SESSION_BYTES / 3) * 4 + 1500000;
 const json = (body, status = 200) => Response.json(body, { status });
 const noContent = () => new Response(null, { status: 204 });
 
@@ -49,15 +50,15 @@ export async function readBody(request, maxBytes) {
 function validResult(result) {
   return result && typeof result === 'object' && !Array.isArray(result)
     && typeof result.ok === 'boolean' && (result.exit_code === null || Number.isInteger(result.exit_code)) && typeof result.timed_out === 'boolean'
-    && typeof result.text === 'string' && result.text.length <= 60000
-    && (result.session_id == null || typeof result.session_id === 'string' && result.session_id.length <= 200)
+    && typeof result.text === 'string' && Array.from(result.text).length <= 60000
+    && (result.session_id == null || typeof result.session_id === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/.test(result.session_id))
     && (result.session == null || typeof result.session === 'string')
     && (result.session == null || Boolean(result.session_id))
     && Number.isSafeInteger(result.tool_calls) && result.tool_calls >= 0
     && Number.isSafeInteger(result.commits) && result.commits >= 0
     && (result.branch == null || typeof result.branch === 'string' && result.branch.length <= 255)
     && (result.pr_url == null || typeof result.pr_url === 'string' && /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+$/.test(result.pr_url))
-    && (result.error == null || typeof result.error === 'string' && result.error.length <= 60000);
+    && (result.error == null || typeof result.error === 'string' && Array.from(result.error).length <= 60000);
 }
 
 export async function handleApi(request, deps) {

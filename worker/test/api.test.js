@@ -38,7 +38,7 @@ test('started is idempotent; result is idempotent, rounded and saved without ses
 
 test('result with no started callback costs one minute and failure/timeout statuses are distinct', async t => {
   const f = fixture(t);
-  for (const [overrides, status] of [[{ ok: false, exit_code: 1 }, 'failed'], [{ ok: false, timed_out: true }, 'timeout'], [{}, 'done']]) {
+  for (const [overrides, status] of [[{ ok: false, exit_code: null }, 'failed'], [{ ok: false, exit_code: 1 }, 'failed'], [{ ok: false, timed_out: true }, 'timeout'], [{}, 'done']]) {
     await f.webhook('/ask task'); const task = f.dispatches.at(-1);
     f.advance(400);
     await f.api('POST', `/api/tasks/${task.id}/result`, resultBody(overrides));
@@ -106,7 +106,8 @@ test('result validation rejects oversized output, bad session, foreign PR/branch
   const f = fixture(t);
   await f.webhook('/ask test'); const task = f.dispatches[0]; const path = `/api/tasks/${task.id}`;
   for (const overrides of [{ text: 'x'.repeat(60001) }, { session: '????', session_id: 's' }, { session: btoa('data') },
-    { branch: 'other' }, { pr_url: 'https://github.com/evil/repo/pull/1' }, { tool_calls: -1 }, { ok: 'yes' }]) {
+    { session_id: '../bad' }, { session_id: 'x'.repeat(101) }, { branch: 'other' },
+    { pr_url: 'https://github.com/evil/repo/pull/1' }, { tool_calls: -1 }, { ok: 'yes' }]) {
     assert.equal((await f.api('POST', `${path}/result`, resultBody(overrides))).status, 400);
   }
   assert.equal((await f.api('POST', `${path}/result`, '{invalid')).status, 400);

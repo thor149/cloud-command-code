@@ -1,11 +1,12 @@
 """GitHub Actions half of Cloud Command Code: fetch a task, run it, publish the result.
 
 Standard library only: this module runs on a fresh ``ubuntu-latest`` runner where nothing is
-installed with pip. It is split into three CLI commands (see :func:`main`):
+installed with pip. CLI commands (see :func:`main`):
 
 ``fetch``    download a task, restore its session, announce the run, expose step outputs
 ``agent``    run Command Code in the target checkout and collect the untrusted artifact
 ``publish``  re-fetch the task, apply and push the patch, open a PR, post the result
+``cleanup``  best-effort deletion of the current run's artifacts
 """
 
 import argparse
@@ -26,6 +27,7 @@ import tarfile
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path, PurePosixPath
 
@@ -38,10 +40,11 @@ MAX_TEXT_CHARS = 60_000
 MAX_SESSION_BYTES = 20 * 1024 * 1024
 MAX_SESSION_UNPACKED = 200 * 1024 * 1024
 MAX_PATCH_BYTES = 5 * 1024 * 1024
+MAX_SAFE_INTEGER = (1 << 53) - 1  # JSON counters must survive JavaScript without losing precision.
 DEFAULT_TIMEOUT_MINUTES = 15
 HTTP_TIMEOUT = 60
 
-BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
+BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,254}$")
 SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
@@ -55,8 +58,9 @@ class TaskError(RuntimeError):
 
 def sign(secret: str, method: str, path: str, timestamp: str, body: bytes) -> str:
     """The ``X-Ccbot-Signature`` value from spec §1."""
+    path = urllib.parse.urlsplit(path).path
     body_hash = hashlib.sha256(body).hexdigest()
-    message = f"{method}\n{path}\n{timestamp}\n{body_hash}".encode("utf-8")
+    message = f"{method.upper()}\n{path}\n{timestamp}\n{body_hash}".encode("utf-8")
     digest = hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
     return f"sha256={digest}"
 
@@ -64,22 +68,30 @@ def sign(secret: str, method: str, path: str, timestamp: str, body: bytes) -> st
 def api_request(base: str, secret: str, method: str, path: str,
                 payload: object | None = None) -> tuple[int, bytes]:
     """Call the Worker API with the spec's HMAC headers. Returns ``(status, body)``."""
-    body = b"" if payload is None else json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    timestamp = str(int(time.time()))
-    request = urllib.request.Request(base.rstrip("/") + path, data=body if payload is not None else None,
-                                     method=method)
-    request.add_header("X-Ccbot-Timestamp", timestamp)
-    request.add_header("X-Ccbot-Signature", sign(secret, method, path, timestamp, body))
-    request.add_header("User-Agent", "cloud-command-code")
-    if payload is not None:
-        request.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
-            return response.status, response.read()
-    except urllib.error.HTTPError as exc:
-        return exc.code, exc.read()
-    except (urllib.error.URLError, OSError) as exc:
-        raise TaskError(f"{method} {path} failed: {exc}") from exc
+    body = b"" if payload is None else json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    # All callbacks are idempotent. Retry transient storage/network failures with the same bytes,
+    # but a fresh timestamp/signature; never retry cancellation or validation failures.
+    for attempt in range(4):
+        status = None
+        timestamp = str(int(time.time()))
+        request = urllib.request.Request(base.rstrip("/") + path, data=body if payload is not None else None,
+                                         method=method.upper())
+        request.add_header("X-Ccbot-Timestamp", timestamp)
+        request.add_header("X-Ccbot-Signature", sign(secret, method, request.full_url, timestamp, body))
+        request.add_header("User-Agent", "cloud-command-code")
+        if payload is not None:
+            request.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT) as response:
+                status, reply = response.status, response.read()
+        except urllib.error.HTTPError as exc:
+            status, reply = exc.code, exc.read()
+        except (urllib.error.URLError, OSError) as exc:
+            if attempt == 3:
+                raise TaskError(f"{method} {path} failed: {exc}") from exc
+        if status is not None and (status not in (429, 500, 502, 503, 504) or attempt == 3):
+            return status, reply
+        time.sleep(2 ** attempt)
 
 
 def set_output(name: str, value: str) -> None:
@@ -227,10 +239,12 @@ def fetch_task(api: str, secret: str, task_id: str, out: Path | str, *,
             run_number = int(run_id)
         except ValueError as exc:
             raise TaskError(f"GITHUB_RUN_ID is not a number: {run_id!r}") from exc
-        server = os.environ.get("GITHUB_SERVER_URL", "https://github.com").rstrip("/")
+        task_repo = task.get("repo")
+        if not isinstance(task_repo, str) or repository.casefold() != task_repo.casefold():
+            raise TaskError("The workflow repository does not match the task repository.")
         status, reply = api_request(api, secret, "POST", f"{path}/started",
                                     {"run_id": run_number,
-                                     "run_url": f"{server}/{repository}/actions/runs/{run_id}"})
+                                     "run_url": f"https://github.com/{task_repo}/actions/runs/{run_number}"})
         if status != 204:
             raise TaskError(f"POST {path}/started returned {status}: {reply[:500]!r}")
 
@@ -402,7 +416,7 @@ def run_agent(task: dict, out: Path | str, directory: Path | str, command_bin: s
 def _failed_record(error: str) -> dict:
     return {
         "ok": False, "exit_code": None, "timed_out": False, "text": "", "session_id": None,
-        "tool_calls": 0, "branch": None, "commits": 0, "error": error[:2000],
+        "session": None, "tool_calls": 0, "branch": None, "commits": 0, "pr_url": None, "error": error[:2000],
     }
 
 
@@ -503,7 +517,7 @@ def _read_artifact(artifact: Path | str) -> tuple[dict, bytes | None, bytes | No
                 blob = handle.read(MAX_SESSION_BYTES + 1)
         except OSError:
             blob = b""
-        if len(blob) <= MAX_SESSION_BYTES and blob and valid_session_archive(blob):
+        if record["session_id"] and len(blob) <= MAX_SESSION_BYTES and blob and valid_session_archive(blob):
             session = blob
         elif blob:
             print("ccbot: ignoring an invalid session archive.", file=sys.stderr)
@@ -531,11 +545,11 @@ def _clean_result(raw: object) -> dict:
                                    or not SESSION_RE.fullmatch(session_id)):
         raise TaskError("result.json: session_id is invalid")
     tool_calls = raw.get("tool_calls", 0)
-    if isinstance(tool_calls, bool) or not isinstance(tool_calls, int) or tool_calls < 0:
-        raise TaskError("result.json: tool_calls must be a non-negative integer")
+    if isinstance(tool_calls, bool) or not isinstance(tool_calls, int) or not 0 <= tool_calls <= MAX_SAFE_INTEGER:
+        raise TaskError("result.json: tool_calls must be a non-negative safe integer")
     commits = raw.get("commits", 0)
-    if isinstance(commits, bool) or not isinstance(commits, int) or commits < 0:
-        raise TaskError("result.json: commits must be a non-negative integer")
+    if isinstance(commits, bool) or not isinstance(commits, int) or not 0 <= commits <= MAX_SAFE_INTEGER:
+        raise TaskError("result.json: commits must be a non-negative safe integer")
     branch = raw.get("branch")
     if branch is not None and not isinstance(branch, str):
         raise TaskError("result.json: branch must be a string or null")
@@ -603,10 +617,13 @@ def _open_pr(repo_dir: Path, repo: str, base: str, branch: str, prompt: str, sum
     body = (prompt.strip() + "\n\n---\n\n" + (summary or "").strip()).strip()[:MAX_TEXT_CHARS]
     if not body:
         body = "Task from Cloud Command Code."
-    created = subprocess.run(
-        ["gh", "pr", "create", "--repo", repo, "--base", base, "--head", branch,
-         "--title", title, "--body", body],
-        cwd=repo_dir, capture_output=True, text=True, env=env, timeout=120)
+    with tempfile.TemporaryDirectory(prefix="ccbot-pr-") as temp:
+        body_file = Path(temp) / "body.md"
+        body_file.write_text(body, encoding="utf-8")
+        created = subprocess.run(
+            ["gh", "pr", "create", "--repo", repo, "--base", base, "--head", branch,
+             "--title", title, "--body-file", str(body_file)],
+            cwd=repo_dir, capture_output=True, text=True, env=env, timeout=120)
     if created.returncode != 0:
         raise TaskError(f"gh pr create failed: {(created.stderr or created.stdout).strip()[:500]}")
     lines = [line.strip() for line in created.stdout.splitlines() if line.strip()]
@@ -629,13 +646,26 @@ def publish_task(task: dict, artifact: Path | str, repo_dir: Path | str, *,
     pushed = False
     pr_url = None
 
+    if kind == "do" and record["ok"] and not patch and record["commits"]:
+        record = {**record, "ok": False,
+                  "error": _append_error(record["error"], "The agent reported commits but changes.patch is missing or empty.")}
+
     if kind == "do" and record["ok"] and patch:
         try:
             if not branch:
                 raise TaskError("The task has no branch.")
             validate_patch(patch)
             _checkout_branch(repo_dir, base, branch, bool(task.get("continue_branch")))
+            start = gitops.git(repo_dir, "rev-parse", "HEAD")
             _apply_patch(repo_dir, patch)
+            # Git understands C-quoted filenames and mailbox boundaries differently from shlex.
+            # Check every applied commit, including workflow edits later reverted in the patch.
+            for commit in gitops.git(repo_dir, "rev-list", f"{start}..HEAD").splitlines():
+                names = gitops.git(repo_dir, "diff-tree", "--no-commit-id", "--name-only", "--no-renames",
+                                   "-r", "-z", commit).split("\x00")
+                if any(name.lower().startswith(".github/workflows/") for name in names):
+                    raise TaskError("The applied patch modifies a GitHub workflow, which is not allowed.")
+            record["commits"] = _commit_count(repo_dir, start)
             _push_branch(repo_dir, branch, token)
             pushed = True
         except (TaskError, gitops.GitError, OSError, subprocess.SubprocessError) as exc:
@@ -722,9 +752,15 @@ def main(argv: list[str] | None = None) -> int:
     publish_parser.add_argument("--artifact", default=str(default_out().parent / "ccbot-artifact"))
     publish_parser.add_argument("--repo", default=str(Path.cwd()))
 
+    commands.add_parser("cleanup", help="delete this run's artifacts (best effort)")
+
     args = parser.parse_args(argv)
 
     try:
+        if args.command == "cleanup":
+            delete_run_artifacts(os.environ.get("GITHUB_REPOSITORY", ""), os.environ.get("GITHUB_RUN_ID", ""),
+                                 os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN"))
+            return 0
         if args.command == "fetch":
             api = _required_env("CCBOT_API")
             secret = _required_env("CCBOT_SECRET")
@@ -750,9 +786,11 @@ def main(argv: list[str] | None = None) -> int:
             delete_run_artifacts(repository, run_id, token)
             print("Task was cancelled; nothing to publish.")
             return 0
-        result = publish(api, secret, task_id, task, args.artifact, args.repo,
-                         token=token, repo=task.get("repo") or repository)
-        delete_run_artifacts(repository, run_id, token)
+        try:
+            result = publish(api, secret, task_id, task, args.artifact, args.repo,
+                             token=token, repo=task.get("repo") or repository)
+        finally:
+            delete_run_artifacts(repository, run_id, token)
         print(f"Published result: ok={result['ok']} pr={result['pr_url']}")
         return 0
     except (TaskError, gitops.GitError) as exc:

@@ -54,6 +54,29 @@ def header(request, name):
 
 
 class SigningTests(unittest.TestCase):
+    def test_signer_excludes_query_and_normalizes_method(self):
+        expected = task.sign("secret", "GET", "/api/tasks/t_abc", "123", b"")
+        self.assertEqual(task.sign("secret", "get", "/api/tasks/t_abc?ignored=1", "123", b""), expected)
+        self.assertEqual(task.sign("secret", "GET", "https://worker/api/tasks/t_abc?ignored=1", "123", b""), expected)
+
+    def test_http_retries_transient_failures_but_not_cancellation(self):
+        for status, attempts in [(503, 4), (429, 4), (410, 1), (400, 1)]:
+            def unavailable(*_args, **_kwargs):
+                raise HTTPError("https://worker", status, "error", {}, io.BytesIO(b"retry"))
+
+            with self.subTest(status=status), patch.object(task.time, "sleep") as sleep, \
+                    patch.object(task.urllib.request, "urlopen", side_effect=unavailable) as request:
+                self.assertEqual(task.api_request("https://worker", "secret", "GET", "/api/tasks/t_a?x=1"),
+                                 (status, b"retry"))
+                self.assertEqual(request.call_count, attempts)
+                self.assertEqual(sleep.call_count, attempts - 1)
+
+    def test_network_retries_are_bounded(self):
+        with patch.object(task.time, "sleep"), patch.object(task.urllib.request, "urlopen", side_effect=OSError("offline")) as request:
+            with self.assertRaises(task.TaskError):
+                task.api_request("https://worker", "secret", "GET", "/api/tasks/t_a")
+        self.assertEqual(request.call_count, 4)
+
     def test_hmac_vectors(self):
         self.assertEqual(
             task.sign("test-secret", "GET", "/api/tasks/t_abc", "1700000000", b""),
@@ -212,6 +235,31 @@ class FetchTests(unittest.TestCase):
             task.fetch_task("https://api.test", "secret", "t_abc", self.out, home=self.home)
         self.assertIn("ref=main\n", self.outputs.read_text())
 
+    def test_accepts_long_branch_generated_for_maximum_repo_alias(self):
+        branch = "ccbot/" + "a" * 40 + "-20261030-1200-" + "b" * 36 + "-01234567"
+        self.assertGreater(len(branch), 100)
+        payload = self.task_payload(branch=branch)
+        self.assertEqual(task.ref_for(payload), branch)
+        self.assertEqual(task._branch(payload), branch)
+
+    def test_started_url_matches_the_worker_exactly(self):
+        payload = self.task_payload()
+        with patch.object(task.urllib.request, "urlopen",
+                          side_effect=self.fake_urlopen(200, json.dumps(payload).encode())), \
+                patch.dict(os.environ, {**self.environ, "GITHUB_REPOSITORY": "Owner/Repo",
+                                        "GITHUB_RUN_ID": "00123", "GITHUB_SERVER_URL": "https://other.test"}):
+            task.fetch_task("https://api.test", "secret", "t_abc", self.out, home=self.home)
+        self.assertEqual(self.calls[1]["payload"], {
+            "run_id": 123, "run_url": "https://github.com/owner/repo/actions/runs/123"})
+
+    def test_foreign_workflow_repository_is_rejected_before_started(self):
+        with patch.object(task.urllib.request, "urlopen",
+                          side_effect=self.fake_urlopen(200, json.dumps(self.task_payload()).encode())), \
+                patch.dict(os.environ, {**self.environ, "GITHUB_REPOSITORY": "other/repo"}):
+            with self.assertRaisesRegex(task.TaskError, "repository"):
+                task.fetch_task("https://api.test", "secret", "t_abc", self.out, home=self.home)
+        self.assertEqual(len(self.calls), 1)
+
     def test_410_writes_cancelled_and_creates_no_task(self):
         with patch.object(task.urllib.request, "urlopen", side_effect=self.fake_urlopen(410, b"")), \
                 patch.dict(os.environ, self.environ):
@@ -359,6 +407,79 @@ class PublishTests(unittest.TestCase):
             task.validate_patch(b"x" * (task.MAX_PATCH_BYTES + 1))
         task.validate_patch(b"diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n")
 
+    def test_empty_patch_and_missing_session_are_successful_without_git(self):
+        for present in (False, True):
+            artifact = self.tmp / str(present)
+            artifact.mkdir()
+            (artifact / "result.json").write_text(json.dumps({"ok": True, "exit_code": 0,
+                "text": "No changes needed.", "session_id": "missing-session", "commits": 0}))
+            if present:
+                (artifact / "changes.patch").write_bytes(b"")
+            with patch.object(task, "_push_branch") as push:
+                result = task.publish_task(self.do_task(), artifact, self.tmp / "no-checkout")
+            self.assertTrue(result["ok"])
+            self.assertIsNone(result["session_id"])
+            self.assertIsNone(result["session"])
+            self.assertIsNone(result["branch"])
+            self.assertEqual(result["commits"], 0)
+            push.assert_not_called()
+
+    def test_missing_patch_with_claimed_commits_is_failed(self):
+        artifact = self.tmp / "artifact"
+        artifact.mkdir()
+        (artifact / "result.json").write_text(json.dumps({"ok": True, "exit_code": 0, "commits": 1}))
+        result = task.publish_task(self.do_task(), artifact, self.tmp)
+        self.assertFalse(result["ok"])
+        self.assertIn("changes.patch", result["error"])
+
+    def test_orphan_session_archive_without_id_is_not_uploaded(self):
+        artifact = self.tmp / "artifact"
+        artifact.mkdir()
+        (artifact / "result.json").write_text(json.dumps({"ok": True, "exit_code": 0, "session_id": None}))
+        (artifact / "session.tar.gz").write_bytes(make_tar({"projects/slug/session.jsonl": b"{}\n"}))
+        result = task.publish_task(self.do_task(), artifact, self.tmp)
+        self.assertTrue(result["ok"])
+        self.assertIsNone(result["session"])
+        self.assertIsNone(result["session_id"])
+
+    def test_c_quoted_workflow_path_cannot_bypass_publish_validation(self):
+        repo = make_repo(self.tmp)
+        start = gitops.git(repo, "rev-parse", "HEAD")
+        workflow = repo / ".github" / "workflows" / "ci.yml"
+        workflow.parent.mkdir(parents=True)
+        workflow.write_text("name: untrusted\n")
+        git(repo, "add", "-A")
+        git(repo, "commit", "-q", "-m", "workflow")
+        diff = subprocess.run(["git", "format-patch", f"{start}..HEAD", "--stdout"], cwd=repo,
+                              check=True, capture_output=True).stdout
+        for side in (b"a", b"b"):
+            diff = diff.replace(side + b"/.github/workflows/ci.yml", b'"' + side + b'/.githu\\142/workflows/ci.yml"')
+        # The heuristic parser does not decode Git's octal escapes. The applied trees must be checked.
+        task.validate_patch(diff)
+        publish_repo = self.tmp / "publish"
+        subprocess.run(["git", "clone", "-q", str(repo), str(publish_repo)], check=True)
+        git(publish_repo, "checkout", "-q", start)
+        # Local source base remains the original commit, as in a real fresh publish checkout.
+        git(publish_repo, "update-ref", "refs/remotes/origin/main", start)
+        artifact = self.tmp / "artifact"
+        artifact.mkdir()
+        (artifact / "changes.patch").write_bytes(diff)
+        (artifact / "result.json").write_text(json.dumps({"ok": True, "exit_code": 0, "commits": 1}))
+        with patch.object(task, "_push_branch") as push:
+            result = task.publish_task(self.do_task(), artifact, publish_repo)
+        self.assertFalse(result["ok"])
+        self.assertIn("applied patch modifies a GitHub workflow", result["error"])
+        push.assert_not_called()
+
+    def test_cleanup_runs_even_when_result_callback_fails(self):
+        environ = {"CCBOT_API": "https://worker", "CCBOT_SECRET": "secret", "CCBOT_TASK_ID": "t_a",
+                   "GITHUB_REPOSITORY": "owner/repo", "GITHUB_RUN_ID": "12", "GITHUB_TOKEN": "test-token"}
+        with patch.dict(os.environ, environ), patch.object(task, "fetch_task", return_value=self.do_task()), \
+                patch.object(task, "publish", side_effect=task.TaskError("callback failed")), \
+                patch.object(task, "delete_run_artifacts") as cleanup:
+            self.assertEqual(task.main(["publish", "--artifact", str(self.tmp), "--repo", str(self.tmp)]), 1)
+        cleanup.assert_called_once_with("owner/repo", "12", "test-token")
+
     def test_missing_artifact_posts_a_failed_result(self):
         posted = []
 
@@ -391,6 +512,19 @@ class PublishTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertIn("invalid", result["error"])
         self.assertEqual(posted, [result])
+
+    def test_counters_outside_javascript_integer_range_are_reported_as_failure(self):
+        artifact = self.tmp / "artifact"
+        artifact.mkdir()
+        for counter in ("tool_calls", "commits"):
+            with self.subTest(counter=counter):
+                (artifact / "result.json").write_text(json.dumps({"ok": True, "exit_code": 0,
+                                                               counter: 1 << 53}))
+                result = task.publish_task(self.do_task(), artifact, self.tmp)
+                self.assertFalse(result["ok"])
+                self.assertIn("safe integer", result["error"])
+                self.assertEqual(result["tool_calls"], 0)
+                self.assertEqual(result["commits"], 0)
 
     def test_applies_pushes_and_opens_a_pr(self):
         origin, _seed = self._origin_with_main()

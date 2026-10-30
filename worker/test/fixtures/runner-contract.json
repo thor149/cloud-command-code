@@ -1,0 +1,200 @@
+[
+  {
+    "mode": "success",
+    "timestamp": 1792065600,
+    "task": {
+      "id": "t_contract_success",
+      "kind": "ask",
+      "repo": "owner/app",
+      "name": "app",
+      "prompt": "Explain the code",
+      "base": "main",
+      "branch": null,
+      "continue_branch": false,
+      "session_id": null,
+      "session": null,
+      "model": null,
+      "effort": null,
+      "edit_mode": "edits",
+      "timeout_minutes": 15
+    },
+    "artifact_result": {
+      "ok": true,
+      "exit_code": 0,
+      "timed_out": false,
+      "text": "__CONTRACT_TEXT__",
+      "session_id": "session-1",
+      "tool_calls": 12,
+      "branch": null,
+      "commits": 0,
+      "error": null
+    },
+    "session": "H4sIAEpc5GoC/+3VMQrCMBSA4cyewgtomybqeUoI2lqT0pdO4t0NnUQQFMUO/b/lhbdk+pN+iK13SQrpxmMhXqSJYaO3rcTQqd8os72108yeZ2YeznmvjTVarUv1B6OkesjXq2W63lYKy9W/6N+dvDv3sQlJvn4LPu9/d7AV/dM/5ur/4lM9hT/L/2+rkv7pHwAAAAAAAAAAAADwtjupLJi0ACgAAA==",
+    "requests": [
+      {
+        "url": "https://worker/api/tasks/t_contract_success",
+        "method": "GET",
+        "headers": {
+          "X-ccbot-timestamp": "1792065600",
+          "X-ccbot-signature": "sha256=cdabfac82d355e96cddc2e0770061a3fe3a1636701ddf0111ab830a5929c0070",
+          "User-agent": "cloud-command-code"
+        },
+        "body": ""
+      },
+      {
+        "url": "https://worker/api/tasks/t_contract_success/started",
+        "method": "POST",
+        "headers": {
+          "X-ccbot-timestamp": "1792065600",
+          "X-ccbot-signature": "sha256=2da64d4ea4d7d96f75e7d493036a1e372ac7ac69c682ebd3b92f8e8dab005bca",
+          "User-agent": "cloud-command-code",
+          "Content-type": "application/json"
+        },
+        "body": "{\"run_id\":123,\"run_url\":\"https://github.com/owner/app/actions/runs/123\"}"
+      },
+      {
+        "url": "https://worker/api/tasks/t_contract_success/result",
+        "method": "POST",
+        "headers": {
+          "X-ccbot-timestamp": "1792065600",
+          "X-ccbot-signature": "sha256=cf9df47749c6f8f9834c9331dc01dae17644aec8b5043626ce6d227ca417f260",
+          "User-agent": "cloud-command-code",
+          "Content-type": "application/json"
+        },
+        "body": "{\"ok\":true,\"exit_code\":0,\"timed_out\":false,\"text\":\"__CONTRACT_TEXT__\",\"session_id\":\"session-1\",\"session\":\"H4sIAEpc5GoC/+3VMQrCMBSA4cyewgtomybqeUoI2lqT0pdO4t0NnUQQFMUO/b/lhbdk+pN+iK13SQrpxmMhXqSJYaO3rcTQqd8os72108yeZ2YeznmvjTVarUv1B6OkesjXq2W63lYKy9W/6N+dvDv3sQlJvn4LPu9/d7AV/dM/5ur/4lM9hT/L/2+rkv7pHwAAAAAAAAAAAADwtjupLJi0ACgAAA==\",\"tool_calls\":12,\"branch\":null,\"commits\":0,\"pr_url\":null,\"error\":null}"
+      }
+    ]
+  },
+  {
+    "mode": "missing",
+    "timestamp": 1792065600,
+    "task": {
+      "id": "t_contract_missing",
+      "kind": "ask",
+      "repo": "owner/app",
+      "name": "app",
+      "prompt": "Explain the code",
+      "base": "main",
+      "branch": null,
+      "continue_branch": false,
+      "session_id": null,
+      "session": null,
+      "model": null,
+      "effort": null,
+      "edit_mode": "edits",
+      "timeout_minutes": 15
+    },
+    "artifact_result": {
+      "ok": true,
+      "exit_code": 0,
+      "timed_out": false,
+      "text": "No changes needed.",
+      "session_id": null,
+      "tool_calls": 0,
+      "branch": null,
+      "commits": 0,
+      "error": null
+    },
+    "session": null,
+    "requests": [
+      {
+        "url": "https://worker/api/tasks/t_contract_missing",
+        "method": "GET",
+        "headers": {
+          "X-ccbot-timestamp": "1792065600",
+          "X-ccbot-signature": "sha256=019f9207af6f47b3515f7f803742c7d1e9c143750b8105c3234a6c769e94aa2e",
+          "User-agent": "cloud-command-code"
+        },
+        "body": ""
+      },
+      {
+        "url": "https://worker/api/tasks/t_contract_missing/started",
+        "method": "POST",
+        "headers": {
+          "X-ccbot-timestamp": "1792065600",
+          "X-ccbot-signature": "sha256=1465bb3f679dd408d58674358f8125bc67e56adc7006b4cea2b422ef465e48f9",
+          "User-agent": "cloud-command-code",
+          "Content-type": "application/json"
+        },
+        "body": "{\"run_id\":123,\"run_url\":\"https://github.com/owner/app/actions/runs/123\"}"
+      },
+      {
+        "url": "https://worker/api/tasks/t_contract_missing/result",
+        "method": "POST",
+        "headers": {
+          "X-ccbot-timestamp": "1792065600",
+          "X-ccbot-signature": "sha256=72b2653eb2a5a4c4870efbf24858810ba521c920701a791c7d5044830aeae6d9",
+          "User-agent": "cloud-command-code",
+          "Content-type": "application/json"
+        },
+        "body": "{\"ok\":false,\"exit_code\":null,\"timed_out\":false,\"text\":\"\",\"session_id\":null,\"session\":null,\"tool_calls\":0,\"branch\":null,\"commits\":0,\"pr_url\":null,\"error\":\"The agent job produced no result: result.json is missing from the ccbot-out artifact.\"}"
+      }
+    ]
+  },
+  {
+    "mode": "empty",
+    "timestamp": 1792065600,
+    "task": {
+      "id": "t_contract_empty",
+      "kind": "do",
+      "repo": "owner/app",
+      "name": "app",
+      "prompt": "Check whether changes are needed",
+      "base": "main",
+      "branch": "ccbot/fixture",
+      "continue_branch": false,
+      "session_id": null,
+      "session": null,
+      "model": null,
+      "effort": null,
+      "edit_mode": "edits",
+      "timeout_minutes": 45
+    },
+    "artifact_result": {
+      "ok": true,
+      "exit_code": 0,
+      "timed_out": false,
+      "text": "No changes needed.",
+      "session_id": null,
+      "tool_calls": 0,
+      "branch": null,
+      "commits": 0,
+      "error": null
+    },
+    "session": null,
+    "requests": [
+      {
+        "url": "https://worker/api/tasks/t_contract_empty",
+        "method": "GET",
+        "headers": {
+          "X-ccbot-timestamp": "1792065600",
+          "X-ccbot-signature": "sha256=15ed2dd5732ed3a2d38499c38b880704ae7c86457baf9c0f017db695444afb8c",
+          "User-agent": "cloud-command-code"
+        },
+        "body": ""
+      },
+      {
+        "url": "https://worker/api/tasks/t_contract_empty/started",
+        "method": "POST",
+        "headers": {
+          "X-ccbot-timestamp": "1792065600",
+          "X-ccbot-signature": "sha256=cd0a9786389f22d1a34a0d9a8645a86ed294846a6a973687484241213a768424",
+          "User-agent": "cloud-command-code",
+          "Content-type": "application/json"
+        },
+        "body": "{\"run_id\":123,\"run_url\":\"https://github.com/owner/app/actions/runs/123\"}"
+      },
+      {
+        "url": "https://worker/api/tasks/t_contract_empty/result",
+        "method": "POST",
+        "headers": {
+          "X-ccbot-timestamp": "1792065600",
+          "X-ccbot-signature": "sha256=8693e97c0fd91bb91bd69a169415f592825afe5916ab0b608a22d1ae1069866e",
+          "User-agent": "cloud-command-code",
+          "Content-type": "application/json"
+        },
+        "body": "{\"ok\":true,\"exit_code\":0,\"timed_out\":false,\"text\":\"No changes needed.\",\"session_id\":null,\"session\":null,\"tool_calls\":0,\"branch\":null,\"commits\":0,\"pr_url\":null,\"error\":null}"
+      }
+    ]
+  }
+]

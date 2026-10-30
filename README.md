@@ -1,185 +1,133 @@
-# Cloud Command Code
+# Cloud Command Code — serverless edition
 
-A private Telegram bot that runs [Command Code](https://commandcode.ai) on your repositories from a small
-cloud VM. Ask questions about a codebase from your phone, or hand it a task and get back a branch with the
-change, a diff, and a pull-request link.
+Run [Command Code](https://commandcode.ai) on your repositories from a private Telegram chat. A Cloudflare Worker handles commands and conversation state; GitHub Actions runs each task inside the repository it is working on. Successful edit tasks return a `ccbot/*` branch and a pull request for you to review.
 
-- **Read-only mode** (any project): `/ask` and `/plan` run Command Code in plan mode. It reads code; it can't
-  edit files or run commands. Follow-up questions continue the same conversation until `/new`.
-- **Edit mode** (projects marked writable): `/do` creates a fresh `ccbot/*` branch in its own git worktree,
-  lets Command Code work there, then reports the commits. Send `/do` again to keep going on the same branch.
-  `/push` pushes only that branch. The server chooses how much the agent may do:
-  - `EDIT_MODE=edits` (default): file edits only. Shell and web access are denied by a policy file the bot
-    writes into the worktree. The bot commits the result after a successful run.
-  - `EDIT_MODE=full`: edits plus shell commands, so it can install dependencies, run tests and commit itself.
+There is no always-on server. The Worker uses D1 for task metadata and KV for resumable Command Code sessions. The existing [self-hosted VM mode](#self-hosted-vm-mode) is also supported.
 
-  Headless Command Code refuses all file edits unless it is launched with `--yolo`, so both modes launch that
-  way. The difference is enforced entirely by deny rules, which Command Code applies even under `--yolo`.
-
-Only one Telegram account (yours) can use the bot, and only in a private chat.
+```text
+Your private Telegram chat
+          |
+          v
+Cloudflare Worker (/telegram) ---- D1: tasks, settings, conversations, usage
+          |                       KV: session archives
+          | workflow_dispatch(task_id)
+          v
+Target repo: .github/workflows/ccbot.yml
+          | calls this repo's reusable task.yml
+          v
+agent job (contents: read) -- untrusted artifact --> publish job (trusted)
+          |                                         |
+          | HMAC /started                            | validate patch, push ccbot/*, open PR
+          +------------> Worker <--------------------+ HMAC /result
+                            |
+                            v
+                    Telegram answer + PR link
+```
 
 ## Commands
 
-| Command | What it does |
+| Command | Behaviour |
 |---|---|
-| `/projects`, `/use <name>` | List projects; pick the one to work on (remembered across restarts) |
-| `/ask <question>` or plain text | Investigate and answer (read-only) |
-| `/plan <goal>` | Investigate and produce a plan (read-only) |
-| `/new` | Start a fresh conversation for the project |
-| `/sync` | Fast-forward the project's checkout to the latest base branch |
-| `/do <task>` | Work on the task in a `ccbot/*` branch (writable projects only) |
-| `/diff` | The task branch's full diff as a file |
-| `/push` | Push the task branch and get a "open pull request" link |
-| `/discard` | Delete the task branch and its worktree |
-| `/status` | What is running, elapsed time, tool calls, model, open task |
-| `/cancel` | Stop the running job |
-| `/model [id\|default]`, `/models` | Show, set or list models (e.g. `deepseek/deepseek-v4.1-flash`) |
-| `/effort [level\|default]` | `low`, `medium`, `high`, `xhigh` or `max` |
+| `/start`, `/help` | Show help |
+| `/repos`, `/use <name>` | List configured repositories and choose the active one |
+| `/ask <question>` or plain text | Investigate the code in read-only plan mode |
+| `/plan <goal>` | Produce a read-only implementation plan; shares the `/ask` session |
+| `/do <task>` | Edit a writable repo; push a task branch and open a PR when there are changes |
+| `/done` | End the edit conversation; the next `/do` starts a fresh branch and session |
+| `/new` | Start a fresh read-only conversation |
+| `/cancel` | Cancel the active repo's queued/running task |
+| `/status` | Show the repo, active task/run link, model, effort and usage |
+| `/model [id\|default]` | Show or set the model; `default` clears the override |
+| `/effort [low\|medium\|high\|xhigh\|max\|default]` | Show or set reasoning effort |
+| `/usage` | Show usage, free-up/reset times and daily/monthly projections |
+| `/limits` | Show limits; set one with `/limits hourly 60`, `/limits daily 180`, `/limits monthly 1800`, or `/limits daily off` |
 
-While a job runs, the bot edits its "working" message every minute with elapsed time, tool calls and the last
-tool used. One job runs at a time; `/status` and `/cancel` stay responsive.
+Commands addressed to `/command@BotName` also work. Prompts are limited to 4,000 characters, with one queued/running task per repo. Follow-up `/do` commands reuse the branch and session until `/done`. An empty patch is a successful no-op; a missing artifact is reported as a failed run. Long answers arrive as Markdown documents.
+
+## Setup
+
+You need a Cloudflare account, GitHub repositories with Actions enabled, PowerShell 7, Node 22.13+, the GitHub CLI (`gh`) and Wrangler (the commands below use `npx wrangler`). Authenticate `gh auth login` and `npx wrangler login` on your own machine.
+
+1. Create a Telegram bot through [@BotFather](https://t.me/BotFather) (`/newbot`). Create a Command Code API key in [Command Code Studio](https://commandcode.ai/docs/studio). Create a GitHub **fine-grained personal access token**, restricted to your target repos, with **Actions: read and write**. The Worker uses it only to dispatch/cancel runs; publishing uses the separate, repository-scoped Actions token.
+2. Copy [templates/ccbot.yml](templates/ccbot.yml) into **each target repo** as `.github/workflows/ccbot.yml`, on its base branch. It calls `thor149/cloud-command-code/.github/workflows/task.yml@main` and explicitly passes `COMMAND_CODE_API_KEY`, `CCBOT_SECRET` and `CCBOT_API`. This repository includes its own copy. If you fork the runner, update both the reusable-workflow URL and the runner-repo checkouts in `task.yml`.
+3. Provision your own D1 database and KV namespace. From `worker/`:
+
+   ```powershell
+   npx wrangler d1 create ccbot-state
+   npx wrangler kv namespace create SESSIONS
+   ```
+
+   Set their returned IDs in [worker/wrangler.jsonc](worker/wrangler.jsonc); the checked-in IDs belong to the original installation. Set a unique Worker `name`. Add target repos to the JSON string in `vars.REPOS`, using a unique lowercase alias for each repo:
+
+   ```json
+   {"app":{"repo":"you/app","base":"main","writable":true,"metered":true,"workflow":"ccbot.yml"}}
+   ```
+
+   Use `metered: false` for public repos and `writable: false` for read-only repos. Set `DEFAULT_LIMITS`, `DEFAULT_MODEL`, `DEFAULT_EFFORT` and `EDIT_MODE` as needed. Apply the schema and deploy to obtain your Worker URL:
+
+   ```powershell
+   npx wrangler d1 execute ccbot-state --remote --file schema.sql
+   npx wrangler deploy
+   ```
+
+4. From the repository root, run the secret setup yourself:
+
+   ```powershell
+   pwsh -File deploy/serverless/setup-secrets.ps1 -WorkerUrl https://cloud-command-code.YOUR-ACCOUNT.workers.dev -Repos you/app
+   ```
+
+   The script prompts privately for your bot token, Command Code key and fine-grained token, discovers your Telegram owner ID from a private message, generates the HMAC/webhook secrets, sets Worker and target-repo Actions secrets, and registers `/telegram` as the webhook. It does not write secrets into source files. For several repos, invoke from PowerShell with `& ./deploy/serverless/setup-secrets.ps1 -WorkerUrl 'https://cloud-command-code.YOUR-ACCOUNT.workers.dev' -Repos @('you/app','you/docs')`. Use a fresh bot if your current bot is already polling or has another webhook.
+5. Enable **Allow GitHub Actions to create and approve pull requests** in each target repo's Actions settings (subject to organization policy), and protect the base branch with required PR review. Send `/start`, `/repos`, then `/use app`. Try `/ask Where is the entry point?`, followed by a small `/do` task on a writable repo. Review the returned PR yourself before merging. When changing `REPOS` or other Worker variables later, run `npx wrangler deploy` from `worker/` again and ensure each new target has the workflow and three secrets.
 
 ## Security model
 
-- **Owner only.** Every handler checks your numeric Telegram ID *and* that the chat is a private chat with you.
-  Everyone else, and every group, is ignored silently.
-- **Fixed permission boundary.** Telegram text is passed to Command Code as a single prompt argument. The
-  permission mode comes from the bot's own code: plan mode for `/ask` and `/plan`; for `/do`, `edits` or
-  `full` from the server config, never from chat. In `edits` mode the bot writes a per-run
-  `.commandcode/settings.local.json` into the worktree (git-excluded) that denies Shell and web access. A deny
-  beats any allow rule a repository ships in its own `.commandcode/settings.json`. This was tested: a repo
-  allowing `Shell` still had its shell call denied, and a `Read(.env)` deny kept a planted secret out of the
-  answer.
-- **Global deny policy.** `deploy/commandcode-policy.json` is installed as `/home/ccbot/.commandcode/settings.json`,
-  root-owned in a sticky directory, so the agent can't change or delete it. In every mode it blocks reading
-  `.env`/key files and `~/.ssh`, editing the main checkouts in `~/repos`, `git push`, `git remote`,
-  `git config`, and MCP tools.
-- **Isolated VM.** The Google Cloud VM is in its own project and has **no service account**, so even a fully
-  compromised bot cannot reach any other cloud resource.
-- **Sandboxed service.** systemd runs the bot as the unprivileged user `ccbot` with `ProtectSystem=strict`:
-  it can write only to `/home/ccbot` (repos, worktrees, caches) and its state directory.
-- **Secrets stay put.** The bot token, your ID and the Command Code API key live in
-  `/etc/commandcode-bot/env` (root-only, mode 600), loaded by systemd. `TELEGRAM_*` variables are stripped
-  from the agent's environment, and the bot token is redacted from logs.
-- **Per-repo deploy keys.** Each GitHub repo gets its own SSH deploy key. Give write access only to repos you
-  mark writable; `/push` refuses anything that is not a `ccbot/*` branch.
+- **Owner only:** the Worker verifies the Telegram webhook secret and accepts messages only when sender ID, private-chat ID and configured owner ID all match. Update IDs are deduplicated.
+- **Authenticated callbacks:** every `/api/*` request uses HMAC-SHA256 over the method, URL path without query, timestamp and exact body hash. Timestamps have a five-minute acceptance window; the Worker verifies the MAC with Web Crypto. Cancelled fetches return 410 and stop the runner quietly.
+- **Two jobs:** the agent gets `contents: read` only, with the Command Code key as its only application secret. The Command Code step receives no `GITHUB_TOKEN` or `CCBOT_*` variables. All checkouts disable persisted Git credentials. A separate publish job re-fetches the task, treats the artifact as untrusted, applies accepted changes and uses a one-off Git authorization header to push.
+- **Deny policy:** the runner installs [deploy/commandcode-policy.json](deploy/commandcode-policy.json). `/ask` and `/plan` use plan mode. Default `edits` mode also denies shell/web/MCP tools; `full` permits shell commands for builds and tests. The CLI uses `--yolo` for edits; deny rules remain the intended tool-policy boundary.
+- **Branch-only edits:** the publisher accepts only `ccbot/*` task branches, rejects patches over 5 MB and changes to `.github/workflows/`, and checks the applied commits before pushing. It opens a PR and never merges it. **Review by the owner and GitHub branch protection are essential.**
+- **Sessions and artifacts:** gzip tar members are relative to `~/.commandcode`; extraction rejects traversal, links and devices and bounds archive expansion. Decoded session uploads are limited to 20 MB. Artifacts have one-day retention and are deleted after publishing, with best-effort cleanup on failure.
 
-**Limits, stated plainly.** The agent runs as the same Linux user as the bot. In `full` mode it can run
-arbitrary commands as `ccbot`. The deny rules stop the obvious routes, but a determined program could still
-read the Command Code API key from its environment or use the deploy key to push. So for writable repos,
-**protect the base branch on GitHub** (Settings → Branches → require a pull request). Then nothing reaches
-`main` without your review. Stay on `edits` mode unless you need the agent to run tests itself.
+The CLI and repository run as the agent runner's OS user; deny rules are not an OS sandbox. In `full` mode arbitrary code can access the Command Code API key and the agent job's files. The separate publish runner keeps the write token and HMAC key out of that job. Treat generated code, answers and sessions as untrusted. Telegram, Command Code, GitHub and Cloudflare process relevant prompts/results; avoid including secrets in prompts.
 
-Telegram messages and answers pass through Telegram's servers. Don't ask the bot to print secrets or private data.
+## Usage and cost limits
 
-## Deploy on Google Cloud
+Standard GitHub-hosted Actions runners have unlimited free compute minutes for **public** repos; **private** repos draw from a monthly plan allowance and can incur charges. Larger runners and artifact storage have separate billing rules. See [GitHub Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions).
 
-The bot only makes outbound connections (Telegram long polling, the Command Code API, git), so it needs no
-inbound ports beyond SSH.
+The bot defaults to hourly/daily/monthly limits of 60/180/1,800 minutes on metered repos. Hourly and daily windows roll over 60 minutes and 24 hours; monthly resets at the start of the UTC calendar month. Usage rounds task runtime up to whole minutes (minimum one), and counts cancelled/failed/timed-out tasks. Unmetered repos are excluded. Limits are checked before dispatch, so an in-flight task can exceed the remaining budget.
 
-### 1. Create an isolated VM
+`/usage` is a task-runtime estimate: it does not measure both Actions jobs, checkout/install overhead, other workflows or artifact storage. It is not a GitHub billing cap. Configure GitHub billing budgets separately. Cloudflare free-plan quotas and Command Code API charges still apply; serverless hosting does not make model usage free. Queued tasks that never start fail after 20 minutes; stalled running tasks expire after their timeout plus 15 minutes, checked by the 15-minute cron.
 
-An `e2-micro` in `us-central1`, `us-west1` or `us-east1` with a 30 GB standard disk falls under Google Cloud's
-Always Free tier (one per billing account). Google may bill a small amount for the VM's external IPv4 address.
+## Self-hosted VM mode
+
+The original Python Telegram bot runs continuously on an Ubuntu VM with Node 22, Python, Git, systemd and outbound internet access. Use a dedicated VM/project without a cloud service account; size it for the builds you intend to run. A 1 GB VM benefits from the installer's 2 GB swap file.
+
+Copy this repository to the VM, then:
 
 ```bash
-PROJECT=cloud-command-code-<suffix>
-gcloud projects create "$PROJECT" --name="Cloud Command Code"
-gcloud billing projects link "$PROJECT" --billing-account=<BILLING_ACCOUNT_ID>
-gcloud services enable compute.googleapis.com --project "$PROJECT"
-gcloud compute instances create ccbot --project "$PROJECT" --zone us-central1-a \
-  --machine-type e2-micro --image-family ubuntu-2404-lts-amd64 --image-project ubuntu-os-cloud \
-  --boot-disk-size 30GB --boot-disk-type pd-standard \
-  --no-service-account --no-scopes --shielded-secure-boot
-```
-
-Copy this project to the VM and install:
-
-```bash
-git archive --format=tar.gz --prefix=commandcode-bot/ -o ccbot.tar.gz HEAD
-gcloud compute scp ccbot.tar.gz ccbot:/tmp/ --project "$PROJECT" --zone us-central1-a
-gcloud compute ssh ccbot --project "$PROJECT" --zone us-central1-a
-# on the VM:
-tar -xzf /tmp/ccbot.tar.gz -C ~ && cd ~/commandcode-bot
 sudo bash deploy/install.sh
-```
-
-`install.sh` is safe to re-run. It installs Node.js 22, the Command Code CLI, Python and git, creates the
-`ccbot` user, adds a 2 GB swap file on small VMs, installs the app to `/opt/commandcode-bot`, and enables the
-systemd service.
-
-### 2. Create the Telegram bot and get a Command Code API key
-
-1. In Telegram, message [@BotFather](https://t.me/BotFather), send `/newbot`, and keep the token it gives you.
-2. Send your new bot any private message (this lets the setup script find your user ID).
-3. Create an API key in [Command Code Studio](https://commandcode.ai/docs/studio).
-
-### 3. Configure
-
-```bash
 sudo bash deploy/configure.sh secrets
+sudo bash deploy/configure.sh add-repo app git@github.com:you/app.git --writable
+sudo bash deploy/configure.sh add-repo notes https://github.com/you/notes.git
+sudo bash deploy/configure.sh status
 ```
 
-This asks, with hidden input, for the bot token and the API key. It can look up your Telegram user ID for you,
-then asks for an optional default model and effort, and the edit mode (`edits` or `full`). Before every
-restart it validates the whole configuration (`python -m commandcode_bot.check`), and the unit gives up after
-five failed starts, so a typo can't cause a restart loop.
+The secrets command asks for your Telegram bot token, Command Code key, owner ID, model, effort and edit mode. Use a **separate bot** from serverless mode: Telegram polling and webhooks cannot serve the same bot simultaneously. For SSH repos, add the printed public deploy key under that repo's **Settings → Deploy keys**, granting write access only where needed. The base defaults to the remote default; override with `--base <branch>`. The service starts after secrets and at least one repo are configured.
 
-### 4. Add repositories
+VM commands include `/projects`, `/sync`, `/diff`, `/push` and `/discard`; `/do` works in an isolated Git worktree and `/push` explicitly publishes its branch. Serverless `/repos`, `/done`, `/usage` and `/limits` are not VM commands. Configuration references: [.env.example](.env.example) and [projects.example.json](projects.example.json).
 
-```bash
-sudo bash deploy/configure.sh add-repo hirable git@github.com:thor149/hirable.git --writable
-sudo bash deploy/configure.sh add-repo notes https://github.com/you/public-notes.git
-```
+The installer creates the unprivileged `ccbot` user, installs a root-owned global deny policy and a systemd service. Credentials live in `/etc/commandcode-bot/env`; the agent environment strips `TELEGRAM_*`. In full mode the agent shares the bot's OS user and can access its deploy keys, so protect base branches and review PRs. To update, copy a fresh checkout to the VM and run `sudo bash deploy/update.sh`; it runs tests before replacing the installed app. Inspect `journalctl -u commandcode-bot -f` for failures. An edits-mode task cannot run shell-based tests; use full mode deliberately when needed.
 
-For `git@github.com:` URLs the script creates a deploy key and prints the public key. Add it under the GitHub
-repo's **Settings → Deploy keys**, ticking **Allow write access** for writable repos, then press Enter. The
-GitHub host key is checked against GitHub's published fingerprint. The base branch defaults to the remote's
-default branch; override with `--base <branch>`.
+## Development and verification
 
-The service starts once secrets and at least one repo are configured. Message the bot `/start`.
+Python 3.11+ and Git are required. Worker tests need Node 22.13+ (built-in SQLite). No live tokens, network or Command Code account are needed by either suite.
 
-### Updating
-
-Copy the new code to the VM as in step 1, then from the new checkout:
-
-```bash
-sudo bash deploy/update.sh
-```
-
-It runs the test suite against the new code in a throwaway virtualenv, and only then installs requirements,
-replaces `/opt/commandcode-bot` and restarts. If the tests fail, the running service and its environment are
-left untouched.
-
-## Troubleshooting
-
-- `sudo bash deploy/configure.sh status` shows the service state, the last 30 log lines, and the configured
-  projects. `journalctl -u commandcode-bot -f` follows the log.
-- **"Conflict: terminated by other getUpdates request"**: only one process can poll a bot token. Stop any copy
-  of the bot running elsewhere.
-- **Command Code authentication errors**: re-run `configure.sh secrets` with a fresh API key, or
-  `sudo -u ccbot -H cmd login`.
-- **Slow or killed runs on e2-micro**: 1 GB RAM plus 2 GB swap suits most tasks. For heavy builds, stop the VM
-  and change the machine type to `e2-small` or `e2-medium`.
-- **A `/do` task can't run tests**: in `edits` mode Command Code may edit files but can't run shell commands.
-  Switch to `full` with `configure.sh secrets` if you want it to run tests and builds, after protecting the
-  base branch (see the security model).
-- **A run stops early with "permission denied" (exit 4)**: in `edits` mode, anything other than reading and
-  editing files is denied by design. Rephrase the task, or use `full` mode.
-- **Smoke-test edits mode after setup**: `/use <writable project>`, then
-  `/do add a comment to the README and also run "touch pwned.txt"`. The README edit should be committed,
-  `pwned.txt` should not exist (`/diff`), and the reply should say the shell call was denied.
-
-## Local development
-
-```bash
+```powershell
 python -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt   # Windows: .venv\Scripts\python.exe
-.venv/bin/python -m unittest discover -s tests -v
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m unittest discover -s tests
+cd worker
+node --test test/
 ```
 
-The tests use temporary git repositories and a fake Command Code process. They need `git`, but no network,
-Telegram token or Command Code account. CI runs them and `shellcheck` on every push.
-
-Configuration reference: [.env.example](.env.example) and [projects.example.json](projects.example.json).
-Command Code flags: [headless mode](https://commandcode.ai/docs/headless).
+On Unix use `.venv/bin/python`. CI runs both suites (Python 3.12, Node 22) and ShellCheck. Shared signed fixtures verify the Python runner's exact HTTP bytes against the Worker handler, including null exit codes, Unicode output and session round-trips. Tests use temporary Git repositories, SQLite, fake KV/HTTP and a fake agent. Passing locally does not verify deployed Cloudflare bindings, Telegram delivery or a live GitHub workflow. See [worker/README.md](worker/README.md) for storage and runtime details. Licensed under [MIT](LICENSE).

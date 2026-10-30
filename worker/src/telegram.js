@@ -1,7 +1,9 @@
 export function resultMessage(task, result) {
   const header = task.status === 'cancelled' ? '🛑 Cancelled' : task.status === 'timeout' || result.timed_out ? '⏱ Timed out'
     : result.ok ? '✅ Done' : `❌ Failed (exit ${result.exit_code ?? '?'})`;
-  return `${header} — ${task.minutes} min used\n\n${result.text || result.error || '(No output)'}${result.pr_url ? `\n\nPR: ${result.pr_url} — paste it to Claude for review and merge.` : ''}`;
+  const output = result.text || result.error || '(No output)';
+  const error = result.text && result.error && result.error !== result.text ? `\n\nError: ${result.error}` : '';
+  return `${header} — ${task.minutes} min used\n\n${output}${error}${result.pr_url ? `\n\nPR: ${result.pr_url} — paste it to Claude for review and merge.` : ''}`;
 }
 
 export function createTelegram(token, owner, fetcher = fetch) {

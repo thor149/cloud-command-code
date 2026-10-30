@@ -28,6 +28,7 @@ jobs:
           repository: thor149/cloud-command-code
           ref: main
           path: runner
+          persist-credentials: false
 
       - name: Fetch the task
         id: fetch
@@ -100,6 +101,7 @@ jobs:
           repository: thor149/cloud-command-code
           ref: main
           path: runner
+          persist-credentials: false
 
       - name: Re-fetch the task
         id: fetch
@@ -120,6 +122,7 @@ jobs:
 
       - name: Check out the target repository
         if: ${{ steps.fetch.outputs.kind != 'cancelled' }}
+        continue-on-error: true
         uses: actions/checkout@v4
         with:
           path: repo
@@ -128,8 +131,8 @@ jobs:
           persist-credentials: false
 
       - name: Publish the result
-        if: ${{ steps.fetch.outputs.kind != 'cancelled' }}
-        working-directory: repo
+        if: ${{ !cancelled() && steps.fetch.outcome == 'success' && steps.fetch.outputs.kind != 'cancelled' }}
+        working-directory: runner
         env:
           PYTHONPATH: ${{ github.workspace }}/runner
           CCBOT_API: ${{ secrets.CCBOT_API }}
@@ -140,3 +143,10 @@ jobs:
           python3 -P -m commandcode_bot.task publish
           --artifact "$RUNNER_TEMP/ccbot-artifact"
           --repo "$GITHUB_WORKSPACE/repo"
+
+      - name: Delete this run's artifacts
+        if: ${{ always() }}
+        working-directory: runner
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 -m commandcode_bot.task cleanup

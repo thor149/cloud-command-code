@@ -35,12 +35,30 @@ $github = Read-Secret "GitHub fine-grained token (repos above, permission Action
 $ccbotSecret = New-RandomSecret
 $webhookSecret = New-RandomSecret
 
-Write-Host "2/5  Your Telegram user ID — send your bot any private message now, then press Enter."
-[void] (Read-Host)
-$updates = Invoke-RestMethod -Uri "https://api.telegram.org/bot$telegram/getUpdates" -Method Post -Body (@{ allowed_updates = @("message") } | ConvertTo-Json) -ContentType "application/json"
-$ids = @($updates.result | Where-Object { $_.message.chat.type -eq "private" } | ForEach-Object { $_.message.from.id } | Sort-Object -Unique)
-if ($ids.Count -ne 1) { throw "Expected exactly one private sender, found $($ids.Count). Message the bot (only from your account) and retry." }
-$ownerId = [string] $ids[0]
+$api = "https://api.telegram.org/bot$telegram"
+$botName = (Invoke-RestMethod -Uri "$api/getMe").result.username
+# getUpdates only works while no webhook is set; clear any old one (pending messages are kept).
+[void] (Invoke-RestMethod -Uri "$api/deleteWebhook" -Method Post)
+Write-Host "2/5  Your Telegram user ID"
+Write-Host "     Open https://t.me/$botName in Telegram, tap Start (or send 'hi') — this is your NEW bot, not @BotFather."
+Write-Host "     Then press Enter here. If you know your numeric Telegram user ID you may type it instead."
+$ownerId = $null
+for ($attempt = 1; $attempt -le 5 -and -not $ownerId; $attempt++) {
+    $typed = ([string] (Read-Host "  Press Enter after messaging @$botName")).Trim()
+    $updates = Invoke-RestMethod -Uri "$api/getUpdates" -Method Post -Body (@{ allowed_updates = @("message") } | ConvertTo-Json) -ContentType "application/json"
+    $ids = @($updates.result | Where-Object { $_.message.chat.type -eq "private" } | ForEach-Object { [string] $_.message.from.id } | Sort-Object -Unique)
+    if ($ids.Count -gt 1) { throw "More than one person has messaged @$botName. Only you should message it; ask Claude how to reset." }
+    if ($ids.Count -eq 1) {
+        $ownerId = $ids[0]
+        if ($typed -and $typed -ne $ownerId) { Write-Host "  Note: you typed $typed, but the message came from $ownerId. Using $ownerId." }
+    } elseif ($typed -match '^\d{5,15}$') {
+        $ownerId = $typed
+        Write-Host "  No message found yet; using the ID you typed. If the bot ignores you later, this ID was wrong."
+    } else {
+        Write-Host "  No message from you yet (attempt $attempt of 5). Open https://t.me/$botName , tap Start, then press Enter."
+    }
+}
+if (-not $ownerId) { throw "Could not find your Telegram user ID. Message @$botName and run the script again." }
 Write-Host "  Owner ID: $ownerId"
 
 Write-Host "3/5  Cloudflare Worker secrets"

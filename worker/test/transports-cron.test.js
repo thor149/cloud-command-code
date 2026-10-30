@@ -6,6 +6,14 @@ import { runCron } from '../src/cron.js';
 import { configuration } from '../src/index.js';
 import { fixture } from './helpers.js';
 
+test('failed publication reports its error alongside the agent summary', () => {
+  const message = resultMessage({ status: 'failed', minutes: 1 }, {
+    ok: false, exit_code: 0, text: 'Updated app.py.', error: 'Could not publish the changes: checkout failed.'
+  });
+  assert.match(message, /Updated app.py\./);
+  assert.match(message, /Error: Could not publish the changes: checkout failed\./);
+});
+
 test('GitHub dispatch/cancel URLs, headers, exact input payload, HTTP/network failures', async () => {
   const calls = [];
   const github = createGithub('token', async (url, options) => { calls.push({ url, options }); return new Response(null, { status: 204 }); });

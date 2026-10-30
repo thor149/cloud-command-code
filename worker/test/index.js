@@ -2,5 +2,6 @@
 import './auth.test.js';
 import './commands.test.js';
 import './api.test.js';
+import './runner-contract.test.js';
 import './limits.test.js';
 import './transports-cron.test.js';
