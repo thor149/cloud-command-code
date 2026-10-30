@@ -51,3 +51,17 @@ All tests pass, and you append a DONE note to the log below listing files and an
 If blocked, append BLOCKED with the reason.
 
 ## Log
+
+- **DONE — GitHub Actions runner.** Created `commandcode_bot/task.py` (stdlib-only `fetch`/`agent`/`publish`
+  CLI with spec §1 HMAC, safe session extract/archive, artifact validation, `git am`/one-off-header push/`gh`
+  PR), `commandcode_bot/prompts.py` (moved the three prompt prefixes), `tests/test_task.py` (17 tests),
+  `.github/workflows/task.yml` (reusable `agent` + `publish` jobs) and `templates/ccbot.yml`. Edited
+  `commandcode_bot/bot.py` only to import the prefixes from `prompts.py`. Touched no other files.
+  `python -m unittest discover -s tests`: **55 tests OK, 3 skipped** (POSIX-only), including all pre-existing
+  tests and the required HMAC vectors, tar traversal rejection, fetch outputs/410, do-patch vs ask-no-patch,
+  workflow-path patch rejection, and missing-artifact failed result. Also smoke-tested `fetch` against a local
+  HTTP server that verifies the HMAC and `agent` end-to-end on a temp git repo.
+  Unverified here: this box is Windows, so the POSIX-only real-fake-CLI test and the `python3 -P` invocation
+  are reviewed but not executed; `gh pr create`/artifact deletion were exercised only with a faked `gh` (no
+  live GitHub API); workflows parse as valid YAML but were not run through actionlint or a real Actions run.
+  No commit or push was made.

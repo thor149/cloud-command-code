@@ -1,0 +1,142 @@
+name: ccbot task
+
+on:
+  workflow_call:
+    inputs:
+      task_id:
+        description: Cloud Command Code task id
+        required: true
+        type: string
+    secrets:
+      COMMAND_CODE_API_KEY:
+        required: true
+      CCBOT_SECRET:
+        required: true
+      CCBOT_API:
+        required: true
+
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the runner
+        uses: actions/checkout@v4
+        with:
+          repository: thor149/cloud-command-code
+          ref: main
+          path: runner
+
+      - name: Fetch the task
+        id: fetch
+        working-directory: runner
+        env:
+          CCBOT_API: ${{ secrets.CCBOT_API }}
+          CCBOT_SECRET: ${{ secrets.CCBOT_SECRET }}
+          CCBOT_TASK_ID: ${{ inputs.task_id }}
+        run: python3 -m commandcode_bot.task fetch
+
+      - name: Check out the target repository
+        if: ${{ steps.fetch.outputs.kind != 'cancelled' }}
+        uses: actions/checkout@v4
+        with:
+          path: repo
+          ref: ${{ steps.fetch.outputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        if: ${{ steps.fetch.outputs.kind != 'cancelled' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install Command Code
+        if: ${{ steps.fetch.outputs.kind != 'cancelled' }}
+        run: npm install -g --no-fund --no-audit command-code@latest
+
+      - name: Install the global deny policy
+        if: ${{ steps.fetch.outputs.kind != 'cancelled' }}
+        run: |
+          mkdir -p "$HOME/.commandcode"
+          cp runner/deploy/commandcode-policy.json "$HOME/.commandcode/settings.json"
+
+      - name: Run the agent
+        if: ${{ steps.fetch.outputs.kind != 'cancelled' }}
+        working-directory: repo
+        env:
+          PYTHONPATH: ${{ github.workspace }}/runner
+          COMMAND_CODE_API_KEY: ${{ secrets.COMMAND_CODE_API_KEY }}
+        # -P keeps the untrusted checkout's cwd off sys.path: only the runner package is imported.
+        run: python3 -P -m commandcode_bot.task agent
+
+      - name: Upload the result
+        if: ${{ !cancelled() && steps.fetch.outputs.kind != 'cancelled' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ccbot-out
+          path: |
+            ${{ runner.temp }}/ccbot/result.json
+            ${{ runner.temp }}/ccbot/changes.patch
+            ${{ runner.temp }}/ccbot/session.tar.gz
+          retention-days: 1
+          if-no-files-found: warn
+
+  publish:
+    needs: agent
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - name: Check out the runner
+        uses: actions/checkout@v4
+        with:
+          repository: thor149/cloud-command-code
+          ref: main
+          path: runner
+
+      - name: Re-fetch the task
+        id: fetch
+        working-directory: runner
+        env:
+          CCBOT_API: ${{ secrets.CCBOT_API }}
+          CCBOT_SECRET: ${{ secrets.CCBOT_SECRET }}
+          CCBOT_TASK_ID: ${{ inputs.task_id }}
+        run: python3 -m commandcode_bot.task fetch --no-started --no-session
+
+      - name: Download the agent result
+        if: ${{ steps.fetch.outputs.kind != 'cancelled' }}
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: ccbot-out
+          path: ${{ runner.temp }}/ccbot-artifact
+
+      - name: Check out the target repository
+        if: ${{ steps.fetch.outputs.kind != 'cancelled' }}
+        uses: actions/checkout@v4
+        with:
+          path: repo
+          ref: ${{ steps.fetch.outputs.ref }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Publish the result
+        if: ${{ steps.fetch.outputs.kind != 'cancelled' }}
+        working-directory: repo
+        env:
+          PYTHONPATH: ${{ github.workspace }}/runner
+          CCBOT_API: ${{ secrets.CCBOT_API }}
+          CCBOT_SECRET: ${{ secrets.CCBOT_SECRET }}
+          CCBOT_TASK_ID: ${{ inputs.task_id }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python3 -P -m commandcode_bot.task publish
+          --artifact "$RUNNER_TEMP/ccbot-artifact"
+          --repo "$GITHUB_WORKSPACE/repo"

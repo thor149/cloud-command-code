@@ -1,0 +1,28 @@
+name: Cloud Command Code
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: Cloud Command Code task id
+        required: true
+        type: string
+
+concurrency:
+  group: ccbot
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  ccbot:
+    uses: thor149/cloud-command-code/.github/workflows/task.yml@main
+    with:
+      task_id: ${{ inputs.task_id }}
+    secrets:
+      COMMAND_CODE_API_KEY: ${{ secrets.COMMAND_CODE_API_KEY }}
+      CCBOT_SECRET: ${{ secrets.CCBOT_SECRET }}
+      CCBOT_API: ${{ secrets.CCBOT_API }}

@@ -1,0 +1,16 @@
+{
+  "name": "cloud-command-code",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-01",
+  "d1_databases": [{ "binding": "DB", "database_name": "ccbot-state", "database_id": "78083d3a-414c-4511-a5ba-e94dfb0be7c9" }],
+  "kv_namespaces": [{ "binding": "SESSIONS", "id": "648c8c88d969419f93c467dcfaa3ae1e" }],
+  "triggers": { "crons": ["*/15 * * * *"] },
+  "observability": { "enabled": true },
+  "vars": {
+    "REPOS": "{\"ccbot\":{\"repo\":\"thor149/cloud-command-code\",\"base\":\"main\",\"writable\":true,\"metered\":false,\"workflow\":\"ccbot.yml\"}}",
+    "DEFAULT_LIMITS": "{\"hourly\":60,\"daily\":180,\"monthly\":1800}",
+    "DEFAULT_MODEL": "deepseek/deepseek-v4.1-flash",
+    "DEFAULT_EFFORT": "max",
+    "EDIT_MODE": "edits"
+  }
+}
