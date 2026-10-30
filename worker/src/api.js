@@ -1,6 +1,7 @@
 import { verify } from './auth.js';
 import { conversationKind, isActive } from './store.js';
 import { notifyResult, updateTaskStatus } from './telegram.js';
+import { PAUSED_MESSAGE } from './commands.js';
 
 export const MAX_SESSION_BYTES = 20 * 1024 * 1024;
 // Two 60,000-code-point strings can each use 12 JSON bytes per escaped surrogate pair.
@@ -75,6 +76,9 @@ export async function handleApi(request, deps) {
   const action = match[2];
   if (!action && request.method === 'GET') {
     if (task.status === 'cancelled') return json({ error: 'Cancelled' }, 410);
+    // Only an in-flight publisher may still need a task after pause. Do not hand out
+    // queued or terminal tasks that a manually re-run workflow could execute again.
+    if (deps.config.execution !== 'enabled' && !['running', 'finishing'].includes(task.status)) return json({ error: PAUSED_MESSAGE }, 503);
     const conv = await store.getConversation(task.repo, conversationKind(task.kind));
     let session;
     try { session = await store.getSession(task, conv); }
@@ -85,6 +89,9 @@ export async function handleApi(request, deps) {
       edit_mode: task.edit_mode, timeout_minutes: task.timeout_minutes });
   }
   if (!action || request.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
+  // Check before terminal-task idempotency: replaying an old /started must not look
+  // successful to a runner while execution is paused.
+  if (action === 'started' && deps.config.execution !== 'enabled') return json({ error: PAUSED_MESSAGE }, 503);
   // Ignore duplicate terminal results even if a retry's JSON is damaged.
   if (!isActive(task)) return noContent();
   if (action === 'result' && task.status === 'finishing') return json({ error: 'Result is being saved; retry' }, 503);

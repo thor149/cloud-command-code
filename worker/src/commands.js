@@ -5,6 +5,7 @@ import { notifyResult, updateTaskStatus } from './telegram.js';
 
 const HELP = `💬 <b>Ask &amp; plan</b>\n/ask &lt;question&gt; — or send plain text\n/plan &lt;goal&gt;\n/new — fresh ask/plan conversation\n\n🛠 <b>Edit</b>\n/do &lt;task&gt; — edit on a task branch\n/done — end edit conversation\n\n⚙️ <b>Control</b>\n/repos — list repositories\n/use &lt;name&gt; — select repository\n/status — active task and settings\n/cancel — cancel active task\n/model [id|default]\n/effort [low|medium|high|xhigh|max|default]\n/help — show commands\n\n📊 <b>Limits</b>\n/usage — usage and projections\n/limits [hourly|daily|monthly &lt;minutes|off&gt;]`;
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+export const PAUSED_MESSAGE = 'AI tasks are paused to prevent model/API spending. Your repositories, branches and saved conversations are retained. /status, /repos and other controls still work. An operator must verify hosting and model costs before enabling task execution.';
 
 export function parseCommand(text) {
   const match = /^\/([a-z]+)(?:@[a-z0-9_]+)?(?:\s+([\s\S]*))?$/i.exec(text.trim());
@@ -36,7 +37,7 @@ export async function handleCommand(message, deps) {
   const repo = config.repos[name];
   const reply = text => telegram.send(text);
   const replyHtml = html => telegram.sendHtml(html);
-  if (['start', 'help'].includes(command)) return replyHtml(HELP);
+  if (['start', 'help'].includes(command)) return replyHtml(`${config.execution === 'enabled' ? '' : '⏸ <b>AI tasks paused</b> · no new model work will start\n\n'}${HELP}`);
   if (command === 'repos') return replyHtml(names.map(n => `📁 <b>${escapeHtml(n)}</b>${n === name ? ' · active' : ''}\n<code>${escapeHtml(config.repos[n].repo)}</code>\n<b>Access</b> ${config.repos[n].writable ? 'writable' : 'read-only'}\n<b>Usage</b> ${config.repos[n].metered ? 'metered' : 'unmetered'}`).join('\n\n'));
   if (command === 'use') {
     if (!Object.hasOwn(config.repos, args)) return reply(`Unknown repository. Use /repos. Active: ${name}`);
@@ -69,7 +70,7 @@ export async function handleCommand(message, deps) {
     const [task, model, effort, usage] = await Promise.all([store.active(repo.repo), store.getSetting('model', config.model), store.getSetting('effort', config.effort), getUsage(deps)]);
     const elapsed = task ? Math.max(0, Math.floor((now() - (task.started_at ?? task.created_at)) / 60)) : 0;
     const taskLine = task ? `${task.status === 'queued' ? '⏳' : '▶️'} <b>Task</b> ${task.status} · ${elapsed} min elapsed\n<b>ID</b> <code>${escapeHtml(task.id)}</code>${task.run_url ? `\n${linkHtml('view run', task.run_url)}` : ''}` : '⏳ <b>Task</b> No active task';
-    return replyHtml(`📁 <b>Repository</b> <code>${escapeHtml(name)}</code>\n<b>Source</b> <code>${escapeHtml(repo.repo)}</code>\n${taskLine}\n⚙️ <b>Model</b> <code>${escapeHtml(model || 'default')}</code>\n⚙️ <b>Effort</b> <code>${escapeHtml(effort || 'default')}</code>\n${WINDOWS.map(w => `📊 <b>${w}</b> ${usage.windows[w].used}/${usage.windows[w].limit ?? 'off'} min`).join('\n')}`);
+    return replyHtml(`📁 <b>Repository</b> <code>${escapeHtml(name)}</code>\n<b>Source</b> <code>${escapeHtml(repo.repo)}</code>\n${taskLine}\n<b>AI execution</b> ${config.execution === 'enabled' ? 'enabled (provider charges may apply)' : 'paused (no new model work)'}\n⚙️ <b>Model</b> <code>${escapeHtml(model || 'default')}</code>\n⚙️ <b>Effort</b> <code>${escapeHtml(effort || 'default')}</code>\n${WINDOWS.map(w => `📊 <b>${w}</b> ${usage.windows[w].used}/${usage.windows[w].limit ?? 'off'} min`).join('\n')}`);
   }
   if (command === 'cancel') {
     const task = await store.active(repo.repo);
@@ -90,6 +91,7 @@ export async function handleCommand(message, deps) {
     return notifyResult(deps, ended, result);
   }
   if (!['ask', 'plan', 'do'].includes(command)) return reply('Unknown command. Use /help.');
+  if (config.execution !== 'enabled') return reply(PAUSED_MESSAGE);
   if (!args || args.length > 4000) return reply('Enter a prompt between 1 and 4000 characters.');
   if (command === 'do' && !repo.writable) return reply(`${name} is read-only; /do is unavailable.`);
   if (await store.active(repo.repo)) return reply('A task is already running');

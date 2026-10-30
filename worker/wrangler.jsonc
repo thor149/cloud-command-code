@@ -7,6 +7,7 @@
   "triggers": { "crons": ["*/15 * * * *"] },
   "observability": { "enabled": true },
   "vars": {
+    "TASK_EXECUTION": "paused",
     "REPOS": "{\"ccbot\":{\"repo\":\"thor149/cloud-command-code\",\"base\":\"main\",\"writable\":true,\"metered\":false,\"workflow\":\"ccbot.yml\"}}",
     "DEFAULT_LIMITS": "{\"hourly\":60,\"daily\":180,\"monthly\":1800}",
     "DEFAULT_MODEL": "deepseek/deepseek-v4.1-flash",
