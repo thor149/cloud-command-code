@@ -33,8 +33,25 @@ ready() {
     python3 -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])) else 1)' "$PROJECTS"
 }
 
+validate_config() {
+  # Load the env file the way systemd would and run the bot's own config check as ccbot.
+  (
+    set -a
+    # shellcheck disable=SC1090
+    . "$ENV_FILE"
+    set +a
+    runuser -u "$BOT_USER" -- env -C "$APP_DIR" HOME="$BOT_HOME" "$APP_DIR/.venv/bin/python" -m commandcode_bot.check
+  )
+}
+
 restart_if_ready() {
   if ready; then
+    if ! validate_config; then
+      echo "Not restarting: fix the configuration error above first."
+      return 1
+    fi
+    systemctl reset-failed "$SERVICE" 2>/dev/null || true
+    systemctl enable "$SERVICE" >/dev/null
     systemctl restart "$SERVICE"
     sleep 3
     if systemctl is-active --quiet "$SERVICE"; then
@@ -70,14 +87,14 @@ ask_plain() {
 }
 
 cmd_secrets() {
-  local token apikey userid model effort perm cmdbin answer tmp
+  local token apikey userid model effort mode cmdbin answer tmp
   token="$(get_env TELEGRAM_BOT_TOKEN)"
   apikey="$(get_env COMMAND_CODE_API_KEY)"
   userid="$(get_env TELEGRAM_USER_ID)"
   model="$(get_env DEFAULT_MODEL)"
   effort="$(get_env DEFAULT_EFFORT)"
-  perm="$(get_env EDIT_PERMISSION)"
-  : "${perm:=auto-accept}"
+  mode="$(get_env EDIT_MODE)"
+  : "${mode:=edits}"
 
   ask_secret "Telegram bot token from @BotFather" token
   [[ $token =~ ^[0-9]+:[A-Za-z0-9_-]{30,}$ ]] || die "that does not look like a BotFather token"
@@ -95,9 +112,11 @@ cmd_secrets() {
   ask_plain "Your numeric Telegram user ID" userid
   [[ $userid =~ ^[0-9]+$ ]] || die "the Telegram user ID must be a number"
   ask_plain "Default model (blank = account default, e.g. deepseek/deepseek-v4.1-flash)" model
+  [[ -z $model || $model =~ ^[A-Za-z0-9._/:-]{1,100}$ ]] || die "invalid model id"
   ask_plain "Default effort (blank, low, medium, high, xhigh, max)" effort
-  ask_plain "Edit permission for /do (auto-accept = edits only, yolo = also shell commands)" perm
-  [[ $perm == auto-accept || $perm == yolo ]] || die "edit permission must be auto-accept or yolo"
+  [[ -z $effort || $effort =~ ^(low|medium|high|xhigh|max)$ ]] || die "invalid effort level"
+  ask_plain "Edit mode for /do (edits = file edits only; full = edits plus shell, tests and commits)" mode
+  [[ $mode == edits || $mode == full ]] || die "edit mode must be edits or full"
 
   cmdbin="$(command -v cmd || command -v commandcode || command -v cmdc || true)"
   [[ -n $cmdbin ]] || die "Command Code CLI not found; re-run install.sh"
@@ -116,7 +135,7 @@ cmd_secrets() {
     echo "EDIT_TIMEOUT_SECONDS=$(get_env EDIT_TIMEOUT_SECONDS | grep -E '^[0-9]+$' || echo 2700)"
     echo "DEFAULT_MODEL=$model"
     echo "DEFAULT_EFFORT=$effort"
-    echo "EDIT_PERMISSION=$perm"
+    echo "EDIT_MODE=$mode"
   } > "$tmp"
   chown root:root "$tmp"
   mv -f "$tmp" "$ENV_FILE"
@@ -125,8 +144,11 @@ cmd_secrets() {
 }
 
 ensure_github_host_key() {
-  local known=$BOT_HOME/.ssh/known_hosts scanned
-  if [[ -f $known ]] && ssh-keygen -F github.com -f "$known" >/dev/null; then
+  local known=$BOT_HOME/.ssh/known_hosts scanned existing
+  if [[ -f $known ]] && existing="$(ssh-keygen -F github.com -f "$known" | grep -v '^#')" && [[ -n $existing ]]; then
+    # Never trust an existing entry blindly: it must be GitHub's published key.
+    ssh-keygen -lf - <<< "$existing" | awk '{print $2}' | grep -qxF "$GITHUB_ED25519_FP" ||
+      die "known_hosts has a github.com key that is not GitHub's published ed25519 key; remove it and retry"
     return 0
   fi
   scanned="$(ssh-keyscan -t ed25519 github.com 2>/dev/null)"
@@ -155,12 +177,18 @@ cmd_add_repo() {
   while (( $# )); do
     case $1 in
       --writable) writable=true ;;
-      --base) base=${2:-}; shift ;;
+      --base)
+        [[ -n ${2:-} ]] || die "--base needs a branch name"
+        base=$2
+        shift
+        ;;
       *) die "unknown option: $1" ;;
     esac
     shift
   done
   [[ $name =~ ^[a-z0-9][a-z0-9_-]*$ ]] || die "name must match ^[a-z0-9][a-z0-9_-]*$"
+  [[ -z $base || ($base =~ ^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$ && $base != *..*) ]] || die "invalid base branch: $base"
+  [[ $url =~ ^(git@github\.com:|https://|ssh://) ]] || die "use a git@github.com:, https:// or ssh:// URL"
   dest=$BOT_HOME/repos/$name
   clone_url=$url
 
@@ -186,7 +214,8 @@ cmd_add_repo() {
   if [[ -d $dest/.git ]]; then
     echo "$dest already exists; reusing it."
   else
-    runuser -u "$BOT_USER" -- git clone "$clone_url" "$dest"
+    # No terminal prompts: a private https URL fails fast instead of waiting for a username.
+    runuser -u "$BOT_USER" -- env GIT_TERMINAL_PROMPT=0 git clone "$clone_url" "$dest"
   fi
   if [[ -z $base ]]; then
     head="$(runuser -u "$BOT_USER" -- git -C "$dest" symbolic-ref --quiet --short refs/remotes/origin/HEAD || true)"
@@ -211,7 +240,13 @@ os.replace(tmp, path)
 PY
   chown root:"$BOT_USER" "$PROJECTS"
   chmod 640 "$PROJECTS"
-  echo "Added project '$name' ($( [[ $writable == true ]] && echo "writable, base $base" || echo read-only ))."
+  if [[ $writable == true ]]; then
+    echo "Added project '$name' (writable, base $base)."
+    echo "Recommended: protect '$base' on GitHub (Settings -> Branches -> require a pull request) so only"
+    echo "reviewed ccbot/* branches can ever reach it."
+  else
+    echo "Added project '$name' (read-only)."
+  fi
   restart_if_ready
 }
 

@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(.env)",
+      "Read(.env.local)",
+      "Read(.env.*.local)",
+      "Read(.env.production)",
+      "Read(**/*.pem)",
+      "Read(**/*.key)",
+      "Read(**/id_rsa*)",
+      "Read(**/id_ed25519*)",
+      "Read(~/.ssh/**)",
+      "Edit(~/.ssh/**)",
+      "Edit(~/repos/**)",
+      "Shell(git push*)",
+      "Shell(git * push*)",
+      "Shell(git remote*)",
+      "Shell(git * remote*)",
+      "Shell(git config*)",
+      "Shell(git * config*)",
+      "mcp__*"
+    ]
+  }
+}

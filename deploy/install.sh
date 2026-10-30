@@ -50,6 +50,12 @@ fi
 install -d -m 750 -o "$BOT_USER" -g "$BOT_USER" "$BOT_HOME" "$BOT_HOME/repos" "$BOT_HOME/worktrees"
 install -d -m 700 -o "$BOT_USER" -g "$BOT_USER" "$BOT_HOME/.ssh" "$STATE_DIR"
 install -d -m 750 -o root -g "$BOT_USER" "$CONF_DIR"
+# Global Command Code policy for the bot user. Deny rules here outrank any allow rule a repository
+# ships and hold even in --yolo. The directory is root-owned, group-writable and sticky, so Command
+# Code can keep its sessions there, but the agent (running as ccbot) cannot edit, replace or delete
+# the root-owned settings.json.
+install -d -m 3770 -o root -g "$BOT_USER" "$BOT_HOME/.commandcode"
+install -m 644 -o root -g "$BOT_USER" "$SRC_DIR/deploy/commandcode-policy.json" "$BOT_HOME/.commandcode/settings.json"
 runuser -u "$BOT_USER" -- git config --global user.name "Cloud Command Code"
 runuser -u "$BOT_USER" -- git config --global user.email "ccbot@localhost"
 runuser -u "$BOT_USER" -- git config --global init.defaultBranch main
@@ -88,7 +94,6 @@ fi
 log "systemd unit"
 install -m 644 "$APP_DIR/deploy/commandcode-bot.service" "/etc/systemd/system/$SERVICE.service"
 systemctl daemon-reload
-systemctl enable "$SERVICE" >/dev/null
 
 ready() {
   [[ -s "$CONF_DIR/env" ]] && grep -Eq '^TELEGRAM_BOT_TOKEN=.+' "$CONF_DIR/env" &&
@@ -96,11 +101,14 @@ ready() {
     python3 -c 'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])) else 1)' "$CONF_DIR/projects.json"
 }
 
+# The unit is only enabled once it is configured, so a reboot before setup never leaves a failed unit.
 if ready; then
+  systemctl enable "$SERVICE" >/dev/null
   systemctl restart "$SERVICE"
   sleep 3
   systemctl --no-pager --lines=10 status "$SERVICE" || true
 else
+  systemctl disable "$SERVICE" >/dev/null 2>&1 || true
   cat <<EOF
 
 Installed. Next steps (as root, from this directory):

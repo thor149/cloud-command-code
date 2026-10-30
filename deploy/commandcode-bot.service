@@ -2,6 +2,9 @@
 Description=Cloud Command Code (private Telegram controller for Command Code)
 Wants=network-online.target
 After=network-online.target
+# A configuration error must not restart forever: give up after 5 failures in 10 minutes.
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -11,6 +14,7 @@ WorkingDirectory=/opt/commandcode-bot
 EnvironmentFile=/etc/commandcode-bot/env
 Environment=HOME=/home/ccbot
 Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/opt/commandcode-bot/.venv/bin/python -m commandcode_bot.check
 ExecStart=/opt/commandcode-bot/.venv/bin/python -m commandcode_bot.bot
 StateDirectory=commandcode-bot
 StateDirectoryMode=0700

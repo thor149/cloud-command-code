@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 from telegram.ext import CommandHandler, MessageHandler
 
@@ -44,12 +44,17 @@ def make_repo(root: Path, name: str = "repo") -> Path:
     return repo
 
 
-def fake_process(chunks, returncode=0):
-    return SimpleNamespace(
-        stdout=SimpleNamespace(read=AsyncMock(side_effect=[*chunks, b""])),
-        wait=AsyncMock(return_value=returncode),
-        returncode=returncode,
-    )
+def reader(chunks):
+    return SimpleNamespace(read=AsyncMock(side_effect=[*chunks, b""]))
+
+
+def fake_process(chunks, returncode=0, stderr=()):
+    return SimpleNamespace(stdout=reader(chunks), stderr=reader(stderr),
+                           wait=AsyncMock(return_value=returncode), returncode=returncode, pid=1)
+
+
+async def hang(*_args):
+    await asyncio.sleep(60)
 
 
 def owner_update(text=""):
@@ -98,15 +103,16 @@ class SecurityTests(unittest.TestCase):
         self.assertNotIn("--tools-all", args)
         self.assertEqual(args.count(prompt), 1)
 
-    def test_edit_arguments_follow_configured_permission_only(self):
-        auto = command_args("cmd", "fix it", edit=True)
-        self.assertEqual(auto[auto.index("--permission-mode") + 1], "auto-accept")
-        self.assertIn("--tools-all", auto)
-        self.assertNotIn("--yolo", auto)
-        yolo = command_args("cmd", "fix it", edit=True, edit_permission="yolo")
-        self.assertIn("--yolo", yolo)
+    def test_edit_arguments_follow_configured_mode_only(self):
+        edits = command_args("cmd", "fix it", edit=True)
+        self.assertEqual(edits[edits.index("--permission-mode") + 1], "dont-ask")
+        self.assertNotIn("--yolo", edits)
+        self.assertNotIn("--tools-all", edits)
+        full = command_args("cmd", "fix it", edit=True, edit_mode="full")
+        self.assertIn("--yolo", full)
+        self.assertNotIn("--permission-mode", full)
         with self.assertRaises(ValueError):
-            command_args("cmd", "x", edit=True, edit_permission="anything")
+            command_args("cmd", "x", edit=True, edit_mode="anything")
 
     def test_session_model_and_effort_flags(self):
         args = command_args("cmd", "q", session_id="abc", model="deepseek/deepseek-v4.1-flash", effort="max")
@@ -135,7 +141,8 @@ class ConfigTests(unittest.TestCase):
 
     def test_rejects_bad_names_paths_and_branches(self):
         for raw in ({"Bad Name": str(self.tmp)}, {"ok": "relative/path"}, {"ok": str(self.tmp / "missing")},
-                    {"ok": {"path": str(self.tmp), "base": "../evil"}}, {"ok": {"path": str(self.tmp), "writable": "yes"}}, {}):
+                    {"ok": {"path": str(self.tmp), "base": "../evil"}}, {"ok": {"path": str(self.tmp), "base": "-evil"}},
+                    {"ok": {"path": str(self.tmp), "base": ""}}, {"ok": {"path": str(self.tmp), "writable": "yes"}}, {}):
             with self.assertRaises(ValueError, msg=raw):
                 parse_projects(raw)
 
@@ -175,10 +182,14 @@ class StateTests(unittest.TestCase):
         self.assertIsNone(loaded.active_project)
         self.assertNotIn("gone", loaded.projects)
 
-    def test_corrupt_file_starts_fresh_and_is_kept_aside(self):
+    def test_corrupt_or_wrong_typed_files_never_crash(self):
         path = self.tmp / "state.json"
-        path.write_text("{not json")
-        self.assertIsNone(load_state(path, {"app"}).active_project)
+        for content in ("{not json", '{"projects": ["app"]}', '{"active_project": []}', "[]",
+                        '{"projects": {"app": {"task": {"branch": 3}}}}'):
+            path.write_text(content)
+            state = load_state(path, {"app"})
+            self.assertIsNone(state.active_project, content)
+            self.assertIsNone(state.project("app").task, content)
         self.assertTrue((self.tmp / "state.json.corrupt").exists())
 
 
@@ -201,11 +212,12 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(parser.text(), "It adds two numbers.")
         self.assertEqual(parser.tool_calls, 2)
 
-    def test_plain_output_is_kept_when_there_is_no_result(self):
+    def test_plain_output_and_stderr_are_kept_when_there_is_no_result(self):
         parser = StreamParser()
         parser.feed(b"Error: not authenticated. Run cmd login.\n")
         parser.finish()
-        self.assertIn("not authenticated", parser.text())
+        self.assertIn("not authenticated", parser.text("warning: max turns"))
+        self.assertIn("max turns", parser.text("warning: max turns"))
 
 
 class RunnerTests(unittest.IsolatedAsyncioTestCase):
@@ -215,38 +227,41 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         async def on_tool(name):
             seen.append(name)
 
-        with patch("commandcode_bot.runner.asyncio.create_subprocess_exec",
-                   new=AsyncMock(return_value=fake_process([SAMPLE_RUN.encode()]))) as create:
+        process = fake_process([SAMPLE_RUN.encode()], stderr=[b"some warning\n"])
+        with patch("commandcode_bot.runner.asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)) as create:
             result = await run_headless("cmd", Path(tempfile.gettempdir()), "inspect", 30, on_tool=on_tool)
         self.assertTrue(result.ok)
         self.assertEqual(result.output, "It adds two numbers.")
         self.assertEqual(result.session_id, "sess-1")
+        self.assertEqual(result.last_tool, "grep")
         self.assertEqual(seen, ["read_file", "grep"])
-        self.assertEqual(create.call_args.kwargs["stdin"], asyncio.subprocess.DEVNULL)
-        self.assertNotIn("TELEGRAM_BOT_TOKEN", create.call_args.kwargs["env"])
-        self.assertEqual(create.call_args.kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
+        kwargs = create.call_args.kwargs
+        self.assertEqual(kwargs["stdin"], asyncio.subprocess.DEVNULL)
+        self.assertEqual(kwargs["stderr"], asyncio.subprocess.PIPE)
+        self.assertNotIn("TELEGRAM_BOT_TOKEN", kwargs["env"])
+        self.assertEqual(kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
 
     async def test_failure_reports_exit_code_and_output(self):
-        with patch("commandcode_bot.runner.asyncio.create_subprocess_exec",
-                   new=AsyncMock(return_value=fake_process([b"authentication failed\n"], 3))):
+        process = fake_process([], 3, stderr=[b"authentication failed\n"])
+        with patch("commandcode_bot.runner.asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)):
             result = await run_headless("cmd", Path(tempfile.gettempdir()), "inspect", 30)
         self.assertEqual(result.exit_code, 3)
         self.assertFalse(result.ok)
         self.assertIn("authentication failed", result.output)
 
-    async def test_output_is_bounded_and_labeled(self):
-        huge = json.dumps({"type": "result", "subtype": "success", "finalText": "x" * (MAX_OUTPUT_BYTES + 10)})
+    async def test_output_is_bounded_and_keeps_the_beginning(self):
+        text = "START" + "x" * (MAX_OUTPUT_BYTES + 10)
+        huge = json.dumps({"type": "result", "subtype": "success", "finalText": text})
         with patch("commandcode_bot.runner.asyncio.create_subprocess_exec",
                    new=AsyncMock(return_value=fake_process([huge.encode()]))):
             result = await run_headless("cmd", Path(tempfile.gettempdir()), "inspect", 30)
         self.assertTrue(result.truncated)
+        self.assertTrue(result.output.startswith("START"))
         self.assertLessEqual(len(result.output.encode()), MAX_OUTPUT_BYTES)
 
     async def _hanging_run(self, **kwargs):
-        async def hang(*_args):
-            await asyncio.sleep(60)
-        process = SimpleNamespace(stdout=SimpleNamespace(read=AsyncMock(side_effect=hang)),
-                                  wait=AsyncMock(side_effect=hang), returncode=None)
+        process = SimpleNamespace(stdout=SimpleNamespace(read=AsyncMock(side_effect=hang)), stderr=reader([]),
+                                  wait=AsyncMock(side_effect=hang), returncode=None, pid=1)
 
         async def stop(fake):
             fake.returncode = -9
@@ -269,11 +284,35 @@ class RunnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.cancelled)
         self.assertFalse(result.timed_out)
 
-    async def test_result_does_not_call_success_on_timeout(self):
+    async def test_orphaned_children_holding_the_pipe_are_stopped(self):
+        # The CLI exits after printing its result, but a background child keeps stdout open.
+        chunks = [SAMPLE_RUN.encode()]
+
+        async def read(_size):
+            if chunks:
+                return chunks.pop()
+            await asyncio.sleep(60)
+
+        process = SimpleNamespace(
+            stdout=SimpleNamespace(read=read),
+            stderr=reader([]), wait=AsyncMock(return_value=0), returncode=0, pid=1)
+        with patch("commandcode_bot.runner.asyncio.create_subprocess_exec", new=AsyncMock(return_value=process)), \
+             patch("commandcode_bot.runner._stop_process", new=AsyncMock()) as stopper, \
+             patch("commandcode_bot.runner.DRAIN_GRACE_SECONDS", 0.05):
+            result = await asyncio.wait_for(run_headless("cmd", Path(tempfile.gettempdir()), "x", 30), 5)
+        stopper.assert_awaited_once()
+        self.assertTrue(result.ok)
+        self.assertEqual(result.session_id, "sess-1")
+
+    async def test_result_messages_are_honest(self):
         update = owner_update()
-        await send_result(update, RunResult(-9, "partial", timed_out=True))
+        await send_result(update, RunResult(-9, "", timed_out=True, last_tool="shell_command"))
         self.assertIn("timed out", replies(update)[0])
-        self.assertEqual(replies(update)[1], "partial")
+        self.assertIn("No answer was produced", replies(update)[1])
+        self.assertIn("shell_command", replies(update)[1])
+        update = owner_update()
+        await send_result(update, RunResult(3, "nope"))
+        self.assertIn("not authenticated", replies(update)[0])
 
 
 class GitOpsTests(unittest.TestCase):
@@ -297,6 +336,19 @@ class GitOpsTests(unittest.TestCase):
         self.assertFalse(created.path.exists())
         self.assertNotIn(created.branch, gitops.git(self.repo, "branch"))
 
+    def test_edits_policy_denies_shell_and_is_never_committed(self):
+        created = gitops.create_task_worktree(self.repo, "main", self.tmp / "wt", "app", "task")
+        gitops.prepare_agent_settings(created.path, "edits")
+        policy = json.loads((created.path / gitops.AGENT_SETTINGS).read_text())
+        self.assertEqual(policy["permissions"]["defaultMode"], "dont-ask")
+        self.assertIn("Shell", policy["permissions"]["deny"])
+        self.assertIsNone(gitops.commit_all(created.path, "ccbot: nothing"))  # excluded, so tree is clean
+        gitops.prepare_agent_settings(created.path, "edits")  # idempotent exclude entry
+        exclude = Path(gitops.git(created.path, "rev-parse", "--path-format=absolute", "--git-common-dir")) / "info" / "exclude"
+        self.assertEqual(exclude.read_text().count(gitops.AGENT_SETTINGS.as_posix()), 1)
+        gitops.prepare_agent_settings(created.path, "full")
+        self.assertFalse((created.path / gitops.AGENT_SETTINGS).exists())
+
     def test_refuses_to_push_or_delete_non_task_branches(self):
         with self.assertRaises(gitops.GitError):
             gitops.push_branch(self.repo, "main", "main")
@@ -316,11 +368,12 @@ class GitOpsTests(unittest.TestCase):
         self.assertIn(created.branch, subprocess.run(["git", "branch"], cwd=origin, capture_output=True, text=True).stdout)
         self.assertIn("up to date", gitops.sync_checkout(self.repo, "main"))
 
-    def test_compare_urls(self):
+    def test_compare_urls_only_for_github(self):
         self.assertEqual(gitops.compare_url("git@github-hirable:thor149/hirable.git", "main", "ccbot/x"),
                          "https://github.com/thor149/hirable/compare/main...ccbot/x?expand=1")
         self.assertEqual(gitops.compare_url("https://github.com/thor149/hirable", "main", "ccbot/x"),
                          "https://github.com/thor149/hirable/compare/main...ccbot/x?expand=1")
+        self.assertNotIn("github.com", gitops.compare_url("git@gitlab.com:acme/app.git", "main", "ccbot/x"))
 
 
 class BotFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -336,6 +389,9 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
             "cmd", 30, state_file=self.tmp / "state.json", worktree_root=self.tmp / "wt",
         )
         self.handlers = handlers_of(build_app(self.config))
+
+    def saved(self):
+        return load_state(self.config.state_file, set(self.config.projects))
 
     async def test_intruders_are_ignored(self):
         message = SimpleNamespace(text="hi", reply_text=AsyncMock(), reply_document=AsyncMock())
@@ -362,9 +418,26 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(first.kwargs["session_id"])
         self.assertEqual(second.kwargs["session_id"], "sess-9")
         self.assertIn("Found it.", replies(update))
-        restarted = load_state(self.config.state_file, set(self.config.projects))
-        self.assertEqual(restarted.active_project, "notes")
-        self.assertEqual(restarted.project("notes").ask_session, "sess-9")
+        self.assertEqual(self.saved().active_project, "notes")
+        self.assertEqual(self.saved().project("notes").ask_session, "sess-9")
+
+    async def test_new_during_a_run_is_not_undone(self):
+        update = owner_update()
+        started, finish = asyncio.Event(), asyncio.Event()
+
+        async def slow(*_args, **_kwargs):
+            started.set()
+            await finish.wait()
+            return RunResult(0, "answer", session_id="old-session")
+
+        with patch("commandcode_bot.bot.run_headless", new=AsyncMock(side_effect=slow)):
+            await self.handlers["use"](update, SimpleNamespace(args=["notes"]))
+            job = asyncio.create_task(self.handlers["ask"](update, SimpleNamespace(args=["q"])))
+            await asyncio.wait_for(started.wait(), 5)
+            await self.handlers["new"](update, SimpleNamespace(args=[]))
+            finish.set()
+            await asyncio.wait_for(job, 5)
+        self.assertIsNone(self.saved().project("notes").ask_session)
 
     async def test_do_is_refused_on_read_only_projects(self):
         update = owner_update()
@@ -374,12 +447,15 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
         run.assert_not_called()
         self.assertTrue(any("read-only" in text for text in replies(update)))
 
-    async def test_do_works_on_a_task_branch_and_commits_leftovers(self):
+    async def test_do_works_on_a_task_branch_with_the_edits_policy(self):
         update = owner_update()
 
         async def agent(_bin, directory, prompt, _timeout, **kwargs):
             self.assertTrue(kwargs["edit"])
+            self.assertEqual(kwargs["edit_mode"], "edits")
             self.assertIn("ccbot/app-", prompt)
+            self.assertIn("shell commands are not available", prompt)
+            self.assertTrue((directory / gitops.AGENT_SETTINGS).exists())
             (directory / "app.py").write_text("print('fixed')\n")
             return RunResult(0, "Changed app.py.", session_id="edit-1")
 
@@ -393,12 +469,46 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(run.call_args_list[1].kwargs["session_id"], "edit-1")
         self.assertEqual((self.repo / "app.py").read_text(), "print('v1')\n")
         self.assertTrue(any("1 commit(s)" in text for text in replies(update)))
+        self.assertNotIn("settings.local.json", gitops.full_diff(worktree, "main"))
 
         await self.handlers["diff"](update, SimpleNamespace(args=[]))
         update.message.reply_document.assert_awaited()
         await self.handlers["discard"](update, SimpleNamespace(args=[]))
         self.assertFalse(worktree.exists())
-        self.assertIsNone(load_state(self.config.state_file, {"app", "notes"}).project("app").task)
+        self.assertIsNone(self.saved().project("app").task)
+
+    async def test_failed_run_is_not_committed(self):
+        update = owner_update()
+
+        async def agent(_bin, directory, *_args, **_kwargs):
+            (directory / "app.py").write_text("half-written")
+            return RunResult(-9, "", timed_out=True)
+
+        with patch("commandcode_bot.bot.run_headless", new=AsyncMock(side_effect=agent)) as run:
+            await self.handlers["use"](update, SimpleNamespace(args=["app"]))
+            await self.handlers["do"](update, SimpleNamespace(args=["big", "change"]))
+        worktree = run.call_args.args[1]
+        self.assertTrue(any("nothing was committed" in text for text in replies(update)))
+        self.assertIn("app.py", gitops.git(worktree, "status", "--porcelain"))
+
+    async def test_concurrent_do_creates_one_branch(self):
+        update = owner_update()
+        release = asyncio.Event()
+
+        async def agent(*_args, **_kwargs):
+            await release.wait()
+            return RunResult(0, "ok", session_id="s")
+
+        with patch("commandcode_bot.bot.run_headless", new=AsyncMock(side_effect=agent)) as run:
+            await self.handlers["use"](update, SimpleNamespace(args=["app"]))
+            first = asyncio.create_task(self.handlers["do"](update, SimpleNamespace(args=["one"])))
+            second = asyncio.create_task(self.handlers["do"](update, SimpleNamespace(args=["two"])))
+            await asyncio.sleep(0.5)
+            release.set()
+            await asyncio.wait_for(asyncio.gather(first, second), 10)
+        self.assertEqual(run.await_count, 1)
+        self.assertTrue(any("already running" in t for t in replies(update)))
+        self.assertEqual(len([b for b in gitops.git(self.repo, "branch").split() if b.startswith("ccbot/")]), 1)
 
     async def test_cancel_signals_the_running_job(self):
         update = owner_update()
@@ -419,15 +529,16 @@ class BotFlowTests(unittest.IsolatedAsyncioTestCase):
         texts = replies(update)
         self.assertTrue(any("already running" in t for t in texts))
         self.assertTrue(any("Stopped by /cancel" in t for t in texts))
+        await self.handlers["cancel"](update, SimpleNamespace(args=[]))
+        self.assertEqual(replies(update)[-1], "Nothing is running.")
 
     async def test_model_and_effort_are_persisted_and_validated(self):
         update = owner_update()
         await self.handlers["model"](update, SimpleNamespace(args=["deepseek/deepseek-v4.1-flash"]))
         await self.handlers["effort"](update, SimpleNamespace(args=["max"]))
         await self.handlers["effort"](update, SimpleNamespace(args=["ultra"]))
-        state = load_state(self.config.state_file, set(self.config.projects))
-        self.assertEqual(state.model, "deepseek/deepseek-v4.1-flash")
-        self.assertEqual(state.effort, "max")
+        self.assertEqual(self.saved().model, "deepseek/deepseek-v4.1-flash")
+        self.assertEqual(self.saved().effort, "max")
         self.assertTrue(any("Effort must be one of" in t for t in replies(update)))
 
 

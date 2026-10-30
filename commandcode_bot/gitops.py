@@ -1,6 +1,7 @@
 """Git plumbing for edit tasks. Every task lives on its own ``ccbot/*`` branch in its own worktree,
 so the project's main checkout and base branch are never modified by the agent."""
 
+import json
 import os
 import re
 import subprocess
@@ -35,10 +36,16 @@ def _has_remote(repo: Path) -> bool:
     return "origin" in git(repo, "remote").split()
 
 
+def _fetch_base(repo: Path, base: str, check: bool) -> None:
+    # An explicit refspec also updates refs/remotes/origin/<base> in single-branch clones.
+    git(repo, "fetch", "--quiet", "origin", f"+refs/heads/{base}:refs/remotes/origin/{base}",
+        check=check, timeout=180)
+
+
 def base_ref(repo: Path, base: str) -> str:
     """Prefer the freshly fetched remote base; fall back to the local branch."""
     if _has_remote(repo):
-        git(repo, "fetch", "--quiet", "origin", base, check=False, timeout=180)
+        _fetch_base(repo, base, check=False)
         if git(repo, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{base}", check=False):
             return f"origin/{base}"
     if git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{base}", check=False):
@@ -112,7 +119,39 @@ def remove_task(repo: Path, worktree: Path, branch: str) -> None:
     if worktree.exists():
         git(repo, "worktree", "remove", "--force", str(worktree))
     git(repo, "worktree", "prune", check=False)
-    git(repo, "branch", "-D", branch, check=False)
+    if git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False):
+        git(repo, "branch", "-D", branch)
+    if git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False):
+        raise GitError(f"Branch {branch} still exists (is it checked out in another worktree?).")
+
+
+AGENT_SETTINGS = Path(".commandcode") / "settings.local.json"
+EDITS_ONLY_POLICY = {
+    "permissions": {
+        "defaultMode": "dont-ask",
+        "allow": ["Edit(**)", "Write(**)"],
+        "deny": ["Shell", "WebFetch", "WebSearch", "mcp__*"],
+    }
+}
+
+
+def prepare_agent_settings(worktree: Path, edit_mode: str) -> None:
+    """Pin the worktree's local Command Code permissions for this run. In 'edits' mode the agent may
+    edit files only; a deny on Shell overrides any allow rule a repository ships in its own settings."""
+    target = worktree / AGENT_SETTINGS
+    if edit_mode == "edits":
+        target.parent.mkdir(exist_ok=True)
+        target.write_text(json.dumps(EDITS_ONLY_POLICY, indent=2) + "\n", encoding="utf-8")
+    elif target.exists():
+        target.unlink()
+    common = Path(git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir"))
+    exclude = common / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    entry = AGENT_SETTINGS.as_posix()
+    existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+    if entry not in existing.splitlines():
+        exclude.write_text(existing + ("" if existing.endswith("\n") or not existing else "\n") + entry + "\n",
+                           encoding="utf-8")
 
 
 def sync_checkout(repo: Path, base: str) -> str:
@@ -124,7 +163,7 @@ def sync_checkout(repo: Path, base: str) -> str:
     current = git(repo, "rev-parse", "--abbrev-ref", "HEAD")
     if current != base:
         return f"The main checkout is on {current}, not {base}; not syncing."
-    git(repo, "fetch", "--quiet", "origin", base, timeout=180)
+    _fetch_base(repo, base, check=True)
     before = git(repo, "rev-parse", "--short", "HEAD")
     git(repo, "merge", "--ff-only", "--quiet", f"origin/{base}")
     after = git(repo, "rev-parse", "--short", "HEAD")
@@ -132,10 +171,11 @@ def sync_checkout(repo: Path, base: str) -> str:
 
 
 def compare_url(remote: str, base: str, branch: str) -> str:
-    match = (re.match(r"^git@[^:]+:([^/]+)/(.+?)(?:\.git)?$", remote)
-             or re.match(r"^https://(?:[^@/]+@)?github\.com/([^/]+)/(.+?)(?:\.git)?/?$", remote)
-             or re.match(r"^ssh://git@[^/]+/([^/]+)/(.+?)(?:\.git)?$", remote))
+    """A GitHub "open pull request" link, only for GitHub remotes (incl. our github-<name> SSH aliases)."""
+    match = (re.match(r"^git@(github\.com|github-[a-z0-9_-]+):([^/]+)/(.+?)(?:\.git)?$", remote)
+             or re.match(r"^https://(?:[^@/]+@)?(github\.com)/([^/]+)/(.+?)(?:\.git)?/?$", remote)
+             or re.match(r"^ssh://git@(github\.com|github-[a-z0-9_-]+)/([^/]+)/(.+?)(?:\.git)?$", remote))
     if not match:
-        return f"Pushed {branch}."
-    owner, name = match.groups()
+        return f"(no pull-request link: {remote.split('@')[-1]} is not a GitHub remote)"
+    _, owner, name = match.groups()
     return f"https://github.com/{owner}/{name}/compare/{base}...{branch}?expand=1"

@@ -12,14 +12,18 @@ SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 [[ -x $APP_DIR/.venv/bin/python ]] || { echo "Not installed yet; run deploy/install.sh" >&2; exit 1; }
 [[ $SRC_DIR != "$APP_DIR" ]] || { echo "Run this from the new checkout, not from $APP_DIR." >&2; exit 1; }
 
-echo "==> Installing requirements"
-"$APP_DIR/.venv/bin/python" -m pip install -q -r "$SRC_DIR/requirements.txt"
-
-echo "==> Testing the new code"
-if ! (cd "$SRC_DIR" && "$APP_DIR/.venv/bin/python" -m unittest discover -s tests); then
-  echo "Tests failed; the running service was not changed." >&2
+echo "==> Testing the new code in a throwaway environment"
+test_venv="$(mktemp -d /tmp/ccbot-test-venv.XXXXXX)"
+trap 'rm -rf "$test_venv"' EXIT
+python3 -m venv "$test_venv"
+"$test_venv/bin/python" -m pip install -q -r "$SRC_DIR/requirements.txt"
+if ! (cd "$SRC_DIR" && "$test_venv/bin/python" -m unittest discover -s tests); then
+  echo "Tests failed; the running service and its environment were not changed." >&2
   exit 1
 fi
+
+echo "==> Installing requirements"
+"$APP_DIR/.venv/bin/python" -m pip install -q -r "$SRC_DIR/requirements.txt"
 
 echo "==> Replacing $APP_DIR"
 rsync -a --delete \
@@ -29,6 +33,7 @@ rsync -a --delete \
 chown -R root:root "$APP_DIR"
 chmod -R go-w "$APP_DIR"
 install -m 644 "$APP_DIR/deploy/commandcode-bot.service" "/etc/systemd/system/$SERVICE.service"
+install -m 644 -o root -g ccbot "$APP_DIR/deploy/commandcode-policy.json" /home/ccbot/.commandcode/settings.json
 systemctl daemon-reload
 
 echo "==> Restarting"

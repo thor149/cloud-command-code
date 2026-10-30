@@ -1,137 +1,178 @@
-# Cloud Command Code V1
+# Cloud Command Code
 
-A private Telegram client for read-only Command Code research on one or more repositories. It uses Telegram long polling, so the VM needs outbound internet access but no public bot endpoint. `/plan`, `/task`, and plain text questions all run Command Code with the fixed `--permission-mode plan` flag. The bot does not offer file edits, shell execution, commits, or deployment.
+A private Telegram bot that runs [Command Code](https://commandcode.ai) on your repositories from a small
+cloud VM. Ask questions about a codebase from your phone, or hand it a task and get back a branch with the
+change, a diff, and a pull-request link.
 
-## What you need
+- **Read-only mode** (any project): `/ask` and `/plan` run Command Code in plan mode. It reads code; it can't
+  edit files or run commands. Follow-up questions continue the same conversation until `/new`.
+- **Edit mode** (projects marked writable): `/do` creates a fresh `ccbot/*` branch in its own git worktree,
+  lets Command Code work there, then reports the commits. Send `/do` again to keep going on the same branch.
+  `/push` pushes only that branch. The server chooses how much the agent may do:
+  - `EDIT_MODE=edits` (default): file edits only, enforced by Command Code's fail-closed `dont-ask` mode
+    with shell denied. The bot commits the result after a successful run.
+  - `EDIT_MODE=full`: edits plus shell commands, so it can install dependencies, run tests and commit itself
+    (`--yolo`). Deny rules still apply.
 
-- An Ubuntu 24.04 VM with outbound internet access. An Oracle Always Free eligible instance is one option; confirm eligibility and capacity in your tenancy before creating it.
-- Python 3.11 or newer and Node.js 22 or newer.
-- A Telegram bot token from [@BotFather](https://t.me/BotFather).
-- A repository cloned on the VM, plus a working Command Code login for the same Linux account that runs this service.
+Only one Telegram account (yours) can use the bot, and only in a private chat.
 
-## Create the Oracle VM
+## Commands
 
-In Oracle Cloud, choose **Compute → Instances → Create instance** in your tenancy's home region. Select an **Always Free eligible** Ubuntu 24.04 image and the **VM.Standard.A1.Flex** shape. For one VM, set **2 OCPUs and 12 GB RAM** if those Always Free resources are available in your tenancy. Choose a public subnet, assign a public IPv4 address for SSH, and download the SSH private key. You do not need to open an inbound HTTP port for this bot. Oracle documents [the A1 monthly allowance and possible capacity shortages](https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm); check the final cost estimate before you click Create. Keep the private key off the VM and out of this project.
+| Command | What it does |
+|---|---|
+| `/projects`, `/use <name>` | List projects; pick the one to work on (remembered across restarts) |
+| `/ask <question>` or plain text | Investigate and answer (read-only) |
+| `/plan <goal>` | Investigate and produce a plan (read-only) |
+| `/new` | Start a fresh conversation for the project |
+| `/sync` | Fast-forward the project's checkout to the latest base branch |
+| `/do <task>` | Work on the task in a `ccbot/*` branch (writable projects only) |
+| `/diff` | The task branch's full diff as a file |
+| `/push` | Push the task branch and get a "open pull request" link |
+| `/discard` | Delete the task branch and its worktree |
+| `/status` | What is running, elapsed time, tool calls, model, open task |
+| `/cancel` | Stop the running job |
+| `/model [id\|default]`, `/models` | Show, set or list models (e.g. `deepseek/deepseek-v4.1-flash`) |
+| `/effort [level\|default]` | `low`, `medium`, `high`, `xhigh` or `max` |
 
-From Windows PowerShell, connect with `ssh -i "C:\path\to\oracle-key.key" ubuntu@YOUR_SERVER_IP`. If SSH reports that the key permissions are too open, restrict access to your Windows account before retrying. Oracle's [Linux instance tutorial](https://docs.oracle.com/en-us/iaas/Content/Compute/tutorials/first-linux-instance/overview.htm) covers the console networking and SSH key steps.
+While a job runs, the bot edits its "working" message every minute with elapsed time, tool calls and the last
+tool used. One job runs at a time; `/status` and `/cancel` stay responsive.
 
-## Set up Ubuntu
+## Security model
 
-SSH into the VM as `ubuntu`. Install the base tools:
+- **Owner only.** Every handler checks your numeric Telegram ID *and* that the chat is a private chat with you.
+  Everyone else, and every group, is ignored silently.
+- **Fixed permission boundary.** Telegram text is passed to Command Code as a single prompt argument. The
+  permission mode comes from the bot's own code: plan mode for `/ask` and `/plan`; for `/do`, `edits` or
+  `full` from the server config, never from chat. In `edits` mode the bot writes a per-run
+  `.commandcode/settings.local.json` into the worktree (git-excluded) that denies Shell. A deny always beats
+  any allow rule a repository ships in its own `.commandcode/settings.json`.
+- **Global deny policy.** `deploy/commandcode-policy.json` is installed as `/home/ccbot/.commandcode/settings.json`,
+  root-owned in a sticky directory, so the agent can't change or delete it. In every mode it blocks reading
+  `.env`/key files and `~/.ssh`, editing the main checkouts in `~/repos`, `git push`, `git remote`,
+  `git config`, and MCP tools.
+- **Isolated VM.** The Google Cloud VM is in its own project and has **no service account**, so even a fully
+  compromised bot cannot reach any other cloud resource.
+- **Sandboxed service.** systemd runs the bot as the unprivileged user `ccbot` with `ProtectSystem=strict`:
+  it can write only to `/home/ccbot` (repos, worktrees, caches) and its state directory.
+- **Secrets stay put.** The bot token, your ID and the Command Code API key live in
+  `/etc/commandcode-bot/env` (root-only, mode 600), loaded by systemd. `TELEGRAM_*` variables are stripped
+  from the agent's environment, and the bot token is redacted from logs.
+- **Per-repo deploy keys.** Each GitHub repo gets its own SSH deploy key. Give write access only to repos you
+  mark writable; `/push` refuses anything that is not a `ccbot/*` branch.
 
-```bash
-sudo apt update
-sudo apt install -y git python3 python3-venv python3-pip curl unzip
-python3 --version
-```
+**Limits, stated plainly.** The agent runs as the same Linux user as the bot. In `full` mode it can run
+arbitrary commands as `ccbot`. The deny rules stop the obvious routes, but a determined program could still
+read the Command Code API key from its environment or use the deploy key to push. So for writable repos,
+**protect the base branch on GitHub** (Settings → Branches → require a pull request). Then nothing reaches
+`main` without your review. Stay on `edits` mode unless you need the agent to run tests itself.
 
-Install Node.js 22 or newer using the current [Node.js download instructions](https://nodejs.org/en/download) for Linux, then verify `node --version` and `npm --version`. Install Command Code using its [official quickstart](https://commandcode.ai/docs/quickstart):
+Telegram messages and answers pass through Telegram's servers. Don't ask the bot to print secrets or private data.
 
-```bash
-sudo npm i -g command-code@latest
-cmd --version
-```
+## Deploy on Google Cloud
 
-For this server, the easiest authentication path is a Command Code API key. Generate one in [Command Code Studio](https://commandcode.ai/docs/studio), then add `COMMAND_CODE_API_KEY=...` to the private `.env` file below. Command Code reads this variable directly in headless runs, so a browser login on the VM is unnecessary. The service passes this key to Command Code but removes the Telegram credentials from its child process environment. An interactive `cmd login` as `ubuntu` is also possible if you can complete its browser flow.
+The bot only makes outbound connections (Telegram long polling, the Command Code API, git), so it needs no
+inbound ports beyond SSH.
 
-Clone a project, for example:
+### 1. Create an isolated VM
 
-```bash
-mkdir -p /home/ubuntu/workspace
-git clone YOUR_REPOSITORY_URL /home/ubuntu/workspace/hirable
-```
-
-If the project is private, configure a read-only Git credential on the VM first. The bot never needs a Git write credential.
-
-Copy the provided `commandcode-bot-v1.zip` to the VM, or clone this project after putting it in a Git repository. From Windows PowerShell, an example transfer is:
-
-```powershell
-scp -i "C:\path\to\oracle-key.key" "C:\Users\Lenovo\OneDrive\Desktop\CloudCommandCode\commandcode-bot-v1.zip" ubuntu@YOUR_SERVER_IP:/home/ubuntu/
-```
-
-On the VM, unpack and install it:
-
-```bash
-mkdir -p /home/ubuntu/commandcode-bot
-unzip /home/ubuntu/commandcode-bot-v1.zip -d /home/ubuntu/commandcode-bot
-```
-
-Then:
-
-```bash
-cd /home/ubuntu/commandcode-bot
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
-cp projects.example.json projects.json
-cp .env.example .env
-chmod 600 .env projects.json
-```
-
-Edit `projects.json` to list only the local repositories the bot may inspect. Paths must be absolute and already exist. Edit `.env` with the token, your numeric Telegram user ID, and the correct `PROJECTS_FILE` path. Use `command -v cmd` to find the Linux Command Code executable and set `COMMAND_CODE_BIN` to that absolute path. Do not commit either file.
-
-If you use a Command Code API key, add an uncommented `COMMAND_CODE_API_KEY=...` line to `.env`. After loading that file in the next step, verify Command Code separately from the bot:
-
-```bash
-set -a
-. ./.env
-set +a
-cd /home/ubuntu/workspace/hirable
-cmd -p "Explain this repository" --permission-mode plan --skip-onboarding --trust
-cd /home/ubuntu/commandcode-bot
-```
-
-To find your Telegram user ID without putting the token in a URL or command history, message your new bot privately, then run **before starting the service**:
+An `e2-micro` in `us-central1`, `us-west1` or `us-east1` with a 30 GB standard disk falls under Google Cloud's
+Always Free tier (one per billing account). Google may bill a small amount for the VM's external IPv4 address.
 
 ```bash
-.venv/bin/python -m commandcode_bot.identify
+PROJECT=cloud-command-code-<suffix>
+gcloud projects create "$PROJECT" --name="Cloud Command Code"
+gcloud billing projects link "$PROJECT" --billing-account=<BILLING_ACCOUNT_ID>
+gcloud services enable compute.googleapis.com --project "$PROJECT"
+gcloud compute instances create ccbot --project "$PROJECT" --zone us-central1-a \
+  --machine-type e2-micro --image-family ubuntu-2404-lts-amd64 --image-project ubuntu-os-cloud \
+  --boot-disk-size 30GB --boot-disk-type pd-standard \
+  --no-service-account --no-scopes --shielded-secure-boot
 ```
 
-Paste the BotFather token at the hidden prompt. If no message appears, send the bot another message and retry. The ID shown for your account is `TELEGRAM_USER_ID`.
-
-Test the bot interactively:
+Copy this project to the VM and install:
 
 ```bash
-set -a
-. ./.env
-set +a
-.venv/bin/python -m commandcode_bot.bot
+git archive --format=tar.gz --prefix=commandcode-bot/ -o ccbot.tar.gz HEAD
+gcloud compute scp ccbot.tar.gz ccbot:/tmp/ --project "$PROJECT" --zone us-central1-a
+gcloud compute ssh ccbot --project "$PROJECT" --zone us-central1-a
+# on the VM:
+tar -xzf /tmp/ccbot.tar.gz -C ~ && cd ~/commandcode-bot
+sudo bash deploy/install.sh
 ```
 
-In Telegram, send `/start`, `/projects`, `/use hirable`, `/plan explain the voice interview flow`, and `/task identify likely causes of a hanging interview`. Stop the foreground process before enabling the service: only one poller may use a bot token at a time.
+`install.sh` is safe to re-run. It installs Node.js 22, the Command Code CLI, Python and git, creates the
+`ccbot` user, adds a 2 GB swap file on small VMs, installs the app to `/opt/commandcode-bot`, and enables the
+systemd service.
 
-## Keep it running with systemd
+### 2. Create the Telegram bot and get a Command Code API key
 
-The included unit assumes the paths above and the Linux user `ubuntu`. Adjust it if your setup differs.
+1. In Telegram, message [@BotFather](https://t.me/BotFather), send `/newbot`, and keep the token it gives you.
+2. Send your new bot any private message (this lets the setup script find your user ID).
+3. Create an API key in [Command Code Studio](https://commandcode.ai/docs/studio).
+
+### 3. Configure
 
 ```bash
-sudo cp deploy/commandcode-bot.service /etc/systemd/system/commandcode-bot.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now commandcode-bot
-sudo systemctl status commandcode-bot
-journalctl -u commandcode-bot -n 100 --no-pager
+sudo bash deploy/configure.sh secrets
 ```
 
-The `.env` file is read by systemd. After interactive testing, make it root-owned and mode `600` so the Command Code process cannot read it directly: `sudo chown root:root .env && sudo chmod 600 .env`. Keep it out of Git. The controller removes `TELEGRAM_*` values from the Command Code child process environment. Do not paste the bot token into the unit file or a chat. If a token leaks, rotate it with BotFather. The bot ignores messages from all other users and from groups, including a group where your own account is present.
+This asks, with hidden input, for the bot token and the API key. It can look up your Telegram user ID for you,
+then asks for an optional default model and effort, and the edit mode (`edits` or `full`). Before every
+restart it validates the whole configuration (`python -m commandcode_bot.check`), and the unit gives up after
+five failed starts, so a typo can't cause a restart loop.
 
-## Operating limits
+### 4. Add repositories
 
-- Only one Command Code run executes at a time. `/status` stays responsive while a run is active.
-- A run times out after 15 minutes by default; change `RUN_TIMEOUT_SECONDS` in `.env` within 30–3600 seconds.
-- Output over 7000 characters is sent as a text document. Output over 64 KiB is explicitly truncated.
-- The selected project is held in memory. After a service restart, send `/use <project>` again. Sessions are not resumed in V1.
-- Telegram messages and returned answers pass through Telegram. Avoid asking the bot to expose secrets or private candidate data.
-- Plan mode is a Command Code tool permission boundary. For an additional operating system boundary, run the bot under a dedicated user that has read access only to the approved project checkouts.
+```bash
+sudo bash deploy/configure.sh add-repo hirable git@github.com:thor149/hirable.git --writable
+sudo bash deploy/configure.sh add-repo notes https://github.com/you/public-notes.git
+```
 
-## Local verification
+For `git@github.com:` URLs the script creates a deploy key and prints the public key. Add it under the GitHub
+repo's **Settings → Deploy keys**, ticking **Allow write access** for writable repos, then press Enter. The
+GitHub host key is checked against GitHub's published fingerprint. The base branch defaults to the remote's
+default branch; override with `--base <branch>`.
 
-With Python 3.11+:
+The service starts once secrets and at least one repo are configured. Message the bot `/start`.
+
+### Updating
+
+Copy the new code to the VM as in step 1, then from the new checkout:
+
+```bash
+sudo bash deploy/update.sh
+```
+
+It runs the test suite against the new code in a throwaway virtualenv, and only then installs requirements,
+replaces `/opt/commandcode-bot` and restarts. If the tests fail, the running service and its environment are
+left untouched.
+
+## Troubleshooting
+
+- `sudo bash deploy/configure.sh status` shows the service state, the last 30 log lines, and the configured
+  projects. `journalctl -u commandcode-bot -f` follows the log.
+- **"Conflict: terminated by other getUpdates request"**: only one process can poll a bot token. Stop any copy
+  of the bot running elsewhere.
+- **Command Code authentication errors**: re-run `configure.sh secrets` with a fresh API key, or
+  `sudo -u ccbot -H cmd login`.
+- **Slow or killed runs on e2-micro**: 1 GB RAM plus 2 GB swap suits most tasks. For heavy builds, stop the VM
+  and change the machine type to `e2-small` or `e2-medium`.
+- **A `/do` task can't run tests**: in `edits` mode Command Code may edit files but can't run shell commands.
+  Switch to `full` with `configure.sh secrets` if you want it to run tests and builds, after protecting the
+  base branch (see the security model).
+- **A run stops early with "permission denied" (exit 4)**: in `edits` mode, anything other than reading and
+  editing files is denied by design. Rephrase the task, or use `full` mode.
+
+## Local development
 
 ```bash
 python -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip install -r requirements.txt   # Windows: .venv\Scripts\python.exe
 .venv/bin/python -m unittest discover -s tests -v
 ```
 
-On Windows, replace `.venv/bin/python` with `.venv/Scripts/python.exe`. The Command Code short alias on native Windows is `cmdc`; `cmd` there is the Windows shell. The production target in this guide is Ubuntu.
+The tests use temporary git repositories and a fake Command Code process. They need `git`, but no network,
+Telegram token or Command Code account. CI runs them and `shellcheck` on every push.
 
-CLI flags and read-only behavior are based on [Command Code headless mode](https://commandcode.ai/docs/headless). Polling behavior is based on the [Telegram Bot API](https://core.telegram.org/bots/api#getupdates) and [python-telegram-bot](https://docs.python-telegram-bot.org/en/stable/telegram.ext.application.html).
+Configuration reference: [.env.example](.env.example) and [projects.example.json](projects.example.json).
+Command Code flags: [headless mode](https://commandcode.ai/docs/headless).

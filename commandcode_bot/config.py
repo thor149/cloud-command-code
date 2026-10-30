@@ -7,7 +7,8 @@ from pathlib import Path
 
 
 PROJECT_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
-BRANCH_NAME = re.compile(r"^[A-Za-z0-9._/-]{1,100}$")
+BRANCH_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
+EDIT_MODE_ALIASES = {"edits": "edits", "auto-accept": "edits", "full": "full", "yolo": "full"}
 MODEL_NAME = re.compile(r"^[A-Za-z0-9._/:-]{1,100}$")
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
@@ -32,7 +33,7 @@ class Config:
     worktree_root: Path = Path("worktrees")
     default_model: str | None = None
     default_effort: str | None = None
-    edit_permission: str = "auto-accept"
+    edit_mode: str = "edits"
 
 
 def _bounded_int(name: str, default: int, low: int, high: int) -> int:
@@ -122,9 +123,9 @@ def load_config() -> Config:
     if not state_file.is_absolute() or not worktree_root.is_absolute():
         raise ValueError("STATE_FILE and WORKTREE_ROOT must be absolute paths.")
 
-    edit_permission = os.environ.get("EDIT_PERMISSION", "auto-accept").strip().lower()
-    if edit_permission not in ("auto-accept", "yolo"):
-        raise ValueError("EDIT_PERMISSION must be 'auto-accept' or 'yolo'.")
+    raw_mode = (os.environ.get("EDIT_MODE") or os.environ.get("EDIT_PERMISSION") or "edits").strip().lower()
+    if raw_mode not in EDIT_MODE_ALIASES:
+        raise ValueError("EDIT_MODE must be 'edits' (file edits only) or 'full' (edits and shell commands).")
 
     return Config(
         token=token,
@@ -137,5 +138,5 @@ def load_config() -> Config:
         worktree_root=worktree_root,
         default_model=optional_model(os.environ.get("DEFAULT_MODEL")),
         default_effort=optional_effort(os.environ.get("DEFAULT_EFFORT")),
-        edit_permission=edit_permission,
+        edit_mode=EDIT_MODE_ALIASES[raw_mode],
     )
