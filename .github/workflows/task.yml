@@ -54,6 +54,13 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Cache Command Code npm downloads
+        if: ${{ steps.fetch.outputs.kind != 'cancelled' }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: ccbot-npm-${{ runner.os }}-${{ hashFiles('runner/.github/workflows/task.yml') }}
+
       - name: Install Command Code
         if: ${{ steps.fetch.outputs.kind != 'cancelled' }}
         run: npm install -g --no-fund --no-audit command-code@latest

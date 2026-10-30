@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { createStore } from '../src/store.js';
 import { configuration, handleFetch } from '../src/index.js';
 import { sign } from '../src/auth.js';
+import { statusMessage } from '../src/telegram.js';
 
 // Exercise the actual SQL using SQLite; expose only D1's asynchronous binding interface.
 export function sqliteD1() {
@@ -38,7 +39,17 @@ export function fixture(t, overrides = {}) {
   let clock = Date.UTC(2026, 9, 15, 12) / 1000;
   const messages = [], results = [], dispatches = [], cancellations = [];
   const deps = { env, config: configuration(env), store: createStore(db, kv), now: () => clock,
-    telegram: { async send(text) { messages.push(text); return true; }, async result(task, result) { results.push({ task, result }); return true; } },
+    telegram: {
+      async send(text) { messages.push(text); return true; },
+      async sendHtml(text) { messages.push(text); return true; },
+      async status(task, result) {
+        const text = statusMessage(task, result);
+        if (task.status_message_id != null) messages[task.status_message_id - 1] = text;
+        else messages.push(text);
+        return { ok: true, message_id: task.status_message_id ?? messages.length };
+      },
+      async result(task, result) { results.push({ task, result }); return true; }
+    },
     github: { async dispatch(task) { dispatches.push(task); return { ok: true }; }, async cancel(task) { cancellations.push(task); return { ok: true }; } } };
   let updateId = 0;
   return { ...deps, deps, db, kv, blobs, messages, results, dispatches, cancellations,

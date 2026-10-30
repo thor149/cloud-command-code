@@ -95,9 +95,9 @@ test('settings persist, /model default clears override, /status and /repos repor
   await f.webhook('/effort invalid'); assert.match(f.messages.at(-1), /Use \/effort/);
   await f.webhook('/ask Settings test');
   assert.equal(f.dispatches[0].model, 'new/model'); assert.equal(f.dispatches[0].effort, 'max');
-  await f.webhook('/model default'); await f.webhook('/model'); assert.equal(f.messages.at(-1), 'model: default');
-  await f.webhook('/status'); assert.match(f.messages.at(-1), /queued.*0 min elapsed[\s\S]*Usage:/);
-  await f.webhook('/repos'); assert.match(f.messages.at(-1), /→ app.*writable, metered[\s\S]*docs.*read-only, unmetered/);
+  await f.webhook('/model default'); await f.webhook('/model'); assert.equal(f.messages.at(-1), '⚙️ <b>model</b> <code>default</code>');
+  await f.webhook('/status'); assert.match(f.messages.at(-1), /queued.*0 min elapsed[\s\S]*📊 <b>hourly<\/b>/);
+  await f.webhook('/repos'); assert.match(f.messages.at(-1), /<b>app<\/b> · active[\s\S]*writable[\s\S]*metered[\s\S]*docs[\s\S]*read-only[\s\S]*unmetered/);
   await f.webhook('/use missing'); assert.match(f.messages.at(-1), /Unknown repository/);
   await f.webhook('/help'); assert.match(f.messages.at(-1), /\/cancel/);
 });
@@ -107,9 +107,9 @@ test('/limits supports off, validates syntax and persists each window', async t 
   for (const args of ['daily 0', 'weekly 50', 'daily -5', 'daily 5x', 'daily 2.5', 'daily 5 extra']) {
     await f.webhook(`/limits ${args}`); assert.match(f.messages.at(-1), /Use \/limits/);
   }
-  await f.webhook('/limits daily off'); assert.match(f.messages.at(-1), /daily: off/);
+  await f.webhook('/limits daily off'); assert.match(f.messages.at(-1), /<b>daily<\/b> off/);
   await f.webhook('/limits hourly 12'); await f.webhook('/limits');
-  assert.match(f.messages.at(-1), /hourly: 12 min\ndaily: off\nmonthly: 1800 min/);
+  assert.equal(f.messages.at(-1), '📊 <b>hourly</b> 12 min\n📊 <b>daily</b> off\n📊 <b>monthly</b> 1800 min');
 });
 
 for (const window of ['hourly', 'daily', 'monthly']) test(`metered tasks enforce the ${window} limit with free-up date`, async t => {
@@ -117,9 +117,9 @@ for (const window of ['hourly', 'daily', 'monthly']) test(`metered tasks enforce
   await f.seedUsage(20);
   for (const w of ['hourly', 'daily', 'monthly']) await f.webhook(`/limits ${w} ${w === window ? '20' : 'off'}`);
   await f.webhook('/ask blocked'); assert.equal(f.dispatches.length, 0);
-  assert.match(f.messages.at(-1), new RegExp(`${window} limit reached.*frees up 2026-`));
+  assert.match(f.messages.at(-1), new RegExp(`${window} limit reached</b> 20/20 min\\n<b>Frees up</b> in \\d+ h`));
   await f.webhook('/use docs'); await f.webhook('/ask unmetered'); assert.equal(f.dispatches.length, 1);
-  await f.webhook('/usage'); assert.match(f.messages.at(-1), new RegExp(`${window}: 20 / 20 min`));
+  await f.webhook('/usage'); assert.match(f.messages.at(-1), new RegExp(`<b>${window}</b> 20 / 20 min`));
   if (window === 'monthly') assert.match(f.messages.at(-1), /min\/day/);
 });
 
@@ -151,4 +151,22 @@ test('/cancel handles a queued task starting concurrently', async t => {
   await f.webhook('/cancel');
   assert.equal((await f.store.task(task.id)).status, 'cancelled');
   assert.equal(f.cancellations[0].run_id, 18);
+});
+
+test('help groups all commands and status/repo/settings labels safely escape dynamic values', async t => {
+  const f = fixture(t);
+  await f.webhook('/help');
+  const help = f.messages.at(-1);
+  assert.match(help, /<b>Ask &amp; plan<\/b>[\s\S]*<b>Edit<\/b>[\s\S]*<b>Control<\/b>[\s\S]*<b>Limits<\/b>/);
+  for (const command of ['ask', 'plan', 'new', 'do', 'done', 'repos', 'use', 'status', 'cancel', 'model', 'effort', 'help', 'usage', 'limits']) {
+    assert.ok(help.includes('/' + command), command);
+  }
+  await f.webhook('/model model_<unsafe>&');
+  assert.equal(f.messages.at(-1), '⚙️ <b>model</b> <code>model_&lt;unsafe&gt;&amp;</code>');
+  await f.webhook('/status');
+  assert.match(f.messages.at(-1), /⚙️ <b>Model<\/b> <code>model_&lt;unsafe&gt;&amp;<\/code>\n⚙️ <b>Effort<\/b>/);
+  assert.match(f.messages.at(-1), /📁 <b>Repository<\/b> <code>app<\/code>/);
+  assert.match(f.messages.at(-1), /⏳ <b>Task<\/b> No active task/);
+  await f.webhook('/repos');
+  assert.equal(f.messages.at(-1), '📁 <b>app</b> · active\n<code>owner/app</code>\n<b>Access</b> writable\n<b>Usage</b> metered\n\n📁 <b>docs</b>\n<code>owner/docs</code>\n<b>Access</b> read-only\n<b>Usage</b> unmetered');
 });

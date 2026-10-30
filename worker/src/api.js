@@ -1,5 +1,6 @@
 import { verify } from './auth.js';
 import { conversationKind, isActive } from './store.js';
+import { notifyResult, updateTaskStatus } from './telegram.js';
 
 export const MAX_SESSION_BYTES = 20 * 1024 * 1024;
 // Two 60,000-code-point strings can each use 12 JSON bytes per escaped surrogate pair.
@@ -62,7 +63,7 @@ function validResult(result) {
 }
 
 export async function handleApi(request, deps) {
-  const { store, telegram, now, env } = deps;
+  const { store, now, env } = deps;
   let bytes;
   try { bytes = await readBody(request, MAX_BODY_BYTES); }
   catch { return json({ error: 'Request body too large' }, 413); }
@@ -93,7 +94,7 @@ export async function handleApi(request, deps) {
     if (!body || !Number.isSafeInteger(body.run_id) || body.run_id <= 0 || typeof body.run_url !== 'string'
       || body.run_url !== `https://github.com/${task.repo}/actions/runs/${body.run_id}`) return json({ error: 'Invalid run' }, 400);
     const started = await store.startTask(task.id, body, now());
-    if (started) await telegram.send(`Started: ${body.run_url}`);
+    if (started) await updateTaskStatus(deps, started);
     return noContent();
   }
   if (!validResult(body) || body.branch != null && body.branch !== task.branch
@@ -111,6 +112,6 @@ export async function handleApi(request, deps) {
     await store.releaseResult(claimed);
     return json({ error: 'Result storage failed; retry' }, 503);
   }
-  if (finished) await telegram.result(finished, body);
+  if (finished) await notifyResult(deps, finished, body);
   return noContent();
 }

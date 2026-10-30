@@ -5,3 +5,5 @@ import './api.test.js';
 import './runner-contract.test.js';
 import './limits.test.js';
 import './transports-cron.test.js';
+import './format.test.js';
+import './telegram.test.js';

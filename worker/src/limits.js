@@ -52,15 +52,21 @@ export function usageReport(tasks, limits, now, firstTaskAt = null) {
     dailyHoursLeft: limits.daily == null || hourlyPace === 0 ? null : Math.max(0, limits.daily - windows.daily.used) / hourlyPace };
 }
 
-export function formatUsage(report) {
-  const date = time => new Date(time * 1000).toISOString().replace('.000Z', ' UTC');
+export function formatTime(time, now) {
+  const delta = time - now;
+  if (Number.isFinite(delta) && delta >= 3600) return `in ${Math.ceil(delta / 3600)} h`;
+  return `${new Date(time * 1000).toISOString().slice(11, 16)} UTC`;
+}
+
+export function formatUsage(report, now) {
   const lines = WINDOWS.map(name => {
     const w = report.windows[name];
-    return `${name}: ${w.used} / ${w.limit ?? 'off'} min${w.percent === null ? '' : ` (${w.percent.toFixed(1)}%)`}${w.freesAt === null ? '' : `; ${name === 'monthly' ? 'resets' : 'frees up'} ${date(w.freesAt)}`}`;
+    return `📊 <b>${name}</b> ${w.used} / ${w.limit ?? 'off'} min${w.percent === null ? '' : ` (${Math.round(w.percent)}%)`}${w.freesAt === null ? '' : `\n<b>${name === 'monthly' ? 'Resets' : 'Frees up'}</b> ${formatTime(w.freesAt, now)}`}`;
   });
   if (report.windows.monthly.limit !== null) {
-    lines.push(`At ~${report.dailyRate.toFixed(1)} min/day ${report.outlastsMonth ? "won't run out this month" : `the monthly limit lasts until ${date(report.runsOutAt)} (${report.lastsDays.toFixed(1)} days)`}; month resets ${date(report.monthResetsAt)}.`);
+    lines.push(`\n📈 <b>Monthly projection</b> At ~${report.dailyRate.toFixed(1)} min/day ${report.outlastsMonth ? "won't run out this month" : `the monthly limit lasts until ${formatTime(report.runsOutAt, now)} (${report.lastsDays.toFixed(1)} days)`}.`);
+    lines.push(`<b>Month resets</b> ${formatTime(report.monthResetsAt, now)}`);
   }
-  if (report.dailyHoursLeft !== null) lines.push(`At the last hour's pace (${report.hourlyPace} min/h) the daily limit is reached in ~${report.dailyHoursLeft.toFixed(1)} h.`);
+  if (report.dailyHoursLeft !== null) lines.push(`📈 <b>Daily projection</b> At the last hour's pace (${report.hourlyPace} min/h) the daily limit is reached in ~${report.dailyHoursLeft.toFixed(1)} h.`);
   return lines.join('\n');
 }

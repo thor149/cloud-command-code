@@ -22,7 +22,8 @@ test('started is idempotent; result is idempotent, rounded and saved without ses
   assert.equal((await f.api('POST', `/api/tasks/${task.id}/started`, run)).status, 204);
   f.advance(61);
   assert.equal((await f.api('POST', `/api/tasks/${task.id}/started`, run)).status, 204);
-  assert.equal(f.messages.filter(m => m.startsWith('Started:')).length, 1);
+  assert.equal(f.messages.filter(m => m.startsWith('▶️ <b>Running</b>')).length, 1);
+  assert.equal(f.messages.length, 1);
   const body = resultBody({ session_id: 'session-1', session: btoa('archive') });
   assert.equal((await f.api('POST', `/api/tasks/${task.id}/result`, body)).status, 204);
   const saved = await f.store.task(task.id);

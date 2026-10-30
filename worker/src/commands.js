@@ -1,7 +1,9 @@
-import { formatUsage, parseLimit, usageReport, WINDOWS } from './limits.js';
+import { formatUsage, formatTime, parseLimit, usageReport, WINDOWS } from './limits.js';
 import { conversationKind } from './store.js';
+import { escapeHtml, linkHtml } from './format.js';
+import { notifyResult, updateTaskStatus } from './telegram.js';
 
-const HELP = `/repos — repositories\n/use <name> — select repository\n/ask <question> (or plain text)\n/plan <goal>\n/do <task> — edit on a task branch\n/done — end edit conversation\n/new — fresh ask/plan conversation\n/cancel — cancel active task\n/status\n/model [id|default]\n/effort [low|medium|high|xhigh|max|default]\n/usage\n/limits [hourly|daily|monthly <minutes|off>]`;
+const HELP = `💬 <b>Ask &amp; plan</b>\n/ask &lt;question&gt; — or send plain text\n/plan &lt;goal&gt;\n/new — fresh ask/plan conversation\n\n🛠 <b>Edit</b>\n/do &lt;task&gt; — edit on a task branch\n/done — end edit conversation\n\n⚙️ <b>Control</b>\n/repos — list repositories\n/use &lt;name&gt; — select repository\n/status — active task and settings\n/cancel — cancel active task\n/model [id|default]\n/effort [low|medium|high|xhigh|max|default]\n/help — show commands\n\n📊 <b>Limits</b>\n/usage — usage and projections\n/limits [hourly|daily|monthly &lt;minutes|off&gt;]`;
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 export function parseCommand(text) {
@@ -33,20 +35,21 @@ export async function handleCommand(message, deps) {
   const name = names.includes(storedName) ? storedName : names[0];
   const repo = config.repos[name];
   const reply = text => telegram.send(text);
-  if (['start', 'help'].includes(command)) return reply(HELP);
-  if (command === 'repos') return reply(names.map(n => `${n === name ? '→ ' : ''}${n}: ${config.repos[n].repo} (${config.repos[n].writable ? 'writable' : 'read-only'}, ${config.repos[n].metered ? 'metered' : 'unmetered'})`).join('\n'));
+  const replyHtml = html => telegram.sendHtml(html);
+  if (['start', 'help'].includes(command)) return replyHtml(HELP);
+  if (command === 'repos') return replyHtml(names.map(n => `📁 <b>${escapeHtml(n)}</b>${n === name ? ' · active' : ''}\n<code>${escapeHtml(config.repos[n].repo)}</code>\n<b>Access</b> ${config.repos[n].writable ? 'writable' : 'read-only'}\n<b>Usage</b> ${config.repos[n].metered ? 'metered' : 'unmetered'}`).join('\n\n'));
   if (command === 'use') {
     if (!Object.hasOwn(config.repos, args)) return reply(`Unknown repository. Use /repos. Active: ${name}`);
     await store.setSetting('active_repo', args);
-    return reply(`Active repository: ${args}`);
+    return replyHtml(`📁 <b>Active repository</b> <code>${escapeHtml(args)}</code>`);
   }
   if (command === 'model' || command === 'effort') {
     const fallback = command === 'model' ? config.model : config.effort;
-    if (!args) return reply(`${command}: ${await store.getSetting(command, fallback) || 'default'}`);
+    if (!args) return replyHtml(`⚙️ <b>${command}</b> <code>${escapeHtml(await store.getSetting(command, fallback) || 'default')}</code>`);
     if (command === 'effort' && args !== 'default' && !EFFORTS.includes(args)) return reply(`Use /effort ${EFFORTS.join('|')}|default`);
     if (command === 'model' && (args.length > 200 || /\s|[\x00-\x1f]/.test(args))) return reply('Use /model <model-id> or /model default');
     await store.setSetting(command, args === 'default' ? null : args);
-    return reply(`${command}: ${args}`);
+    return replyHtml(`⚙️ <b>${command}</b> <code>${escapeHtml(args)}</code>`);
   }
   if (command === 'limits') {
     if (args) {
@@ -55,9 +58,9 @@ export async function handleCommand(message, deps) {
       await store.setSetting(`limit:${parsed.window}`, parsed.value);
     }
     const limits = await effectiveLimits(store, config.limits);
-    return reply(WINDOWS.map(w => `${w}: ${limits[w] ?? 'off'}${limits[w] === null ? '' : ' min'}`).join('\n'));
+    return replyHtml(WINDOWS.map(w => `📊 <b>${w}</b> ${limits[w] ?? 'off'}${limits[w] === null ? '' : ' min'}`).join('\n'));
   }
-  if (command === 'usage') return reply(formatUsage(await getUsage(deps)));
+  if (command === 'usage') return replyHtml(formatUsage(await getUsage(deps), now()));
   if (command === 'new' || command === 'done') {
     await store.resetConversation(repo.repo, command === 'new' ? 'ask' : 'do', now());
     return reply(command === 'new' ? `Fresh ask/plan conversation for ${name}.` : `Edit conversation ended for ${name}. Branch and PR stay on GitHub.`);
@@ -65,7 +68,8 @@ export async function handleCommand(message, deps) {
   if (command === 'status') {
     const [task, model, effort, usage] = await Promise.all([store.active(repo.repo), store.getSetting('model', config.model), store.getSetting('effort', config.effort), getUsage(deps)]);
     const elapsed = task ? Math.max(0, Math.floor((now() - (task.started_at ?? task.created_at)) / 60)) : 0;
-    return reply(`Active: ${name} (${repo.repo})\n${task ? `${task.id}: ${task.status}, ${elapsed} min elapsed${task.run_url ? `\n${task.run_url}` : ''}` : 'No active task'}\nModel: ${model || 'default'}; effort: ${effort || 'default'}\nUsage: ${WINDOWS.map(w => `${w} ${usage.windows[w].used}/${usage.windows[w].limit ?? 'off'} min`).join('; ')}`);
+    const taskLine = task ? `${task.status === 'queued' ? '⏳' : '▶️'} <b>Task</b> ${task.status} · ${elapsed} min elapsed\n<b>ID</b> <code>${escapeHtml(task.id)}</code>${task.run_url ? `\n${linkHtml('view run', task.run_url)}` : ''}` : '⏳ <b>Task</b> No active task';
+    return replyHtml(`📁 <b>Repository</b> <code>${escapeHtml(name)}</code>\n<b>Source</b> <code>${escapeHtml(repo.repo)}</code>\n${taskLine}\n⚙️ <b>Model</b> <code>${escapeHtml(model || 'default')}</code>\n⚙️ <b>Effort</b> <code>${escapeHtml(effort || 'default')}</code>\n${WINDOWS.map(w => `📊 <b>${w}</b> ${usage.windows[w].used}/${usage.windows[w].limit ?? 'off'} min`).join('\n')}`);
   }
   if (command === 'cancel') {
     const task = await store.active(repo.repo);
@@ -83,7 +87,7 @@ export async function handleCommand(message, deps) {
       const cancelled = await github.cancel(ended);
       if (!cancelled.ok) await reply(`GitHub cancellation failed (${cancelled.status}): ${cancelled.message}. Worker task is cancelled; late results will be ignored.`);
     }
-    return telegram.result(ended, result);
+    return notifyResult(deps, ended, result);
   }
   if (!['ask', 'plan', 'do'].includes(command)) return reply('Unknown command. Use /help.');
   if (!args || args.length > 4000) return reply('Enter a prompt between 1 and 4000 characters.');
@@ -92,7 +96,7 @@ export async function handleCommand(message, deps) {
   if (repo.metered) {
     const report = await getUsage(deps);
     const blocked = WINDOWS.find(w => report.windows[w].blocked);
-    if (blocked) return reply(`${blocked} limit reached (${report.windows[blocked].used}/${report.windows[blocked].limit} min); frees up ${new Date(report.windows[blocked].freesAt * 1000).toISOString()}. Use /usage.`);
+    if (blocked) return replyHtml(`📊 <b>${blocked} limit reached</b> ${report.windows[blocked].used}/${report.windows[blocked].limit} min\n<b>Frees up</b> ${formatTime(report.windows[blocked].freesAt, now())}\nUse /usage.`);
   }
   const conv = await store.conversation(repo.repo, conversationKind(command), now());
   const id = 't_' + crypto.randomUUID().replace(/-/g, '').slice(0, 16);
@@ -103,11 +107,15 @@ export async function handleCommand(message, deps) {
     edit_mode: config.editMode, timeout_minutes: command === 'do' ? 45 : 15,
     metered: repo.metered, status: 'queued', created_at: now() };
   if (!await store.insertTask(task)) return reply('A task is already running or the conversation changed. Try /status and retry.');
+  // Save the status ID before dispatch: a fast /started callback must see it.
+  await updateTaskStatus(deps, task);
   const dispatch = await github.dispatch(task);
   if (!dispatch.ok) {
     const text = `GitHub dispatch failed (${dispatch.status}): ${dispatch.message}`;
-    await store.endTask(task, 'failed', { ok: false, text }, now());
-    return reply(text);
+    const result = { ok: false, exit_code: null, text };
+    const ended = await store.endTask(task, 'failed', result, now());
+    if (ended) return notifyResult(deps, ended, result);
+    return;
   }
-  return reply(`Queued ${command} for ${name}: ${id}${task.branch ? `\nBranch: ${task.branch}` : ''}`);
+  return;
 }

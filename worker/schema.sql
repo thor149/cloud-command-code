@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   minutes INTEGER NOT NULL DEFAULT 0,
   run_id INTEGER,
   run_url TEXT,
+  status_message_id INTEGER,
   result TEXT,
   claim TEXT,
   claimed_at INTEGER

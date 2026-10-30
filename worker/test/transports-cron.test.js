@@ -6,12 +6,20 @@ import { runCron } from '../src/cron.js';
 import { configuration } from '../src/index.js';
 import { fixture } from './helpers.js';
 
-test('failed publication reports its error alongside the agent summary', () => {
+test('failed publication keeps its warning separate from the agent summary', async () => {
+  const calls = [];
+  const telegram = createTelegram('secret', 42, async (url, options) => {
+    calls.push(JSON.parse(options.body)); return Response.json({ ok: true });
+  });
   const message = resultMessage({ status: 'failed', minutes: 1 }, {
     ok: false, exit_code: 0, text: 'Updated app.py.', error: 'Could not publish the changes: checkout failed.'
   });
-  assert.match(message, /Updated app.py\./);
-  assert.match(message, /Error: Could not publish the changes: checkout failed\./);
+  assert.equal(message, 'Updated app.py.');
+  await telegram.result({ status: 'failed', minutes: 1 }, {
+    ok: false, exit_code: 0, text: 'Updated app.py.', error: 'Could not publish the changes: checkout failed.'
+  });
+  assert.equal(calls[0].text, message);
+  assert.equal(calls[1].text, '⚠️ Could not publish the changes: checkout failed.');
 });
 
 test('GitHub dispatch/cancel URLs, headers, exact input payload, HTTP/network failures', async () => {
@@ -28,20 +36,28 @@ test('GitHub dispatch/cancel URLs, headers, exact input payload, HTTP/network fa
   assert.equal((await createGithub('token', async () => { throw new Error('network'); }).dispatch(task)).status, 0);
 });
 
-test('long results use multipart sendDocument with complete markdown and review link', async () => {
+test('long results send a preview then answer.md, with edit metadata in the footer', async () => {
   const calls = [];
   const telegram = createTelegram('secret', 42, async (url, options) => { calls.push({ url, options }); return Response.json({ ok: true }); });
-  const task = { id: 't_abc', status: 'done', minutes: 3 };
-  const result = { ok: true, text: 'x'.repeat(3501), pr_url: 'https://github.com/owner/app/pull/7' };
+  const task = { id: 't_abc', kind: 'do', status: 'done', minutes: 3, branch: 'ccbot/fix' };
+  const result = { ok: true, text: 'x'.repeat(3501), pr_url: 'https://github.com/owner/app/pull/7', tool_calls: 8 };
   assert.equal(await telegram.result(task, result), true);
-  assert.match(calls[0].url, /\/sendDocument$/);
-  const form = calls[0].options.body;
-  assert.equal(form.get('chat_id'), '42'); assert.match(form.get('caption'), /✅ Done.*3 min/);
-  assert.equal(form.get('document').name, 't_abc.md');
-  assert.equal(await form.get('document').text(), resultMessage(task, result));
-  assert.match(await form.get('document').text(), /paste it to Claude for review and merge/);
-  await telegram.result(task, { ok: true, text: 'short' }); assert.match(calls[1].url, /\/sendMessage$/);
-  assert.equal(JSON.parse(calls[1].options.body).text, '✅ Done — 3 min used\n\nshort');
+  assert.match(calls[0].url, /\/sendMessage$/);
+  const preview = JSON.parse(calls[0].options.body);
+  assert.equal(preview.parse_mode, 'HTML');
+  assert.match(preview.text, /^x{1500}\n\n<i>…full answer attached<\/i>/);
+  assert.match(preview.text, /🌿 <b>Branch<\/b> <code>ccbot\/fix<\/code>/);
+  assert.match(preview.text, /🔀 <b>Pull request<\/b> <a href="https:\/\/github.com\/owner\/app\/pull\/7">#7<\/a> — paste it to Claude for review/);
+  assert.match(preview.text, /🛠 <b>8 tool calls<\/b>/);
+  assert.match(calls[1].url, /\/sendDocument$/);
+  const form = calls[1].options.body;
+  assert.equal(form.get('chat_id'), '42');
+  assert.equal(form.get('document').name, 'answer.md');
+  assert.equal(await form.get('document').text(), result.text);
+  assert.deepEqual(JSON.parse(form.get('link_preview_options')), { is_disabled: true });
+  await telegram.result({ ...task, kind: 'ask' }, { ok: true, text: '**short**' });
+  assert.match(calls[2].url, /\/sendMessage$/);
+  assert.equal(JSON.parse(calls[2].options.body).text, '<b>short</b>');
 });
 
 test('Telegram HTTP, API, JSON and network errors never throw or expose tokens', async t => {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { usageReport, parseLimit, formatUsage, nextMonth } from '../src/limits.js';
+import { usageReport, parseLimit, formatUsage, formatTime, nextMonth } from '../src/limits.js';
 
 const now = Date.UTC(2026, 9, 15, 12) / 1000;
 const task = (minutes, finished_at, metered = true) => ({ minutes, finished_at, created_at: finished_at - 60, metered });
@@ -51,4 +51,15 @@ test('already-exhausted monthly limit is reported even with zero recent pace', (
   const report = usageReport([task(50, now - 8 * 86400)], { monthly: 50 }, now);
   assert.equal(report.dailyRate, 0); assert.equal(report.lastsDays, 0);
   assert.equal(report.runsOutAt, now); assert.equal(report.outlastsMonth, false);
+});
+
+test('usage uses rounded percentages, readable UTC/relative times, and separate projections', () => {
+  const report = usageReport([task(10, now - 600)], { hourly: 60, daily: 180, monthly: 1800 }, now, now - 7 * 86400);
+  const text = formatUsage(report, now);
+  assert.match(text, /📊 <b>hourly<\/b> 10 \/ 60 min \(17%\)\n<b>Frees up<\/b> 12:50 UTC/);
+  assert.match(text, /\n📈 <b>Monthly projection<\/b>/);
+  assert.match(text, /\n📈 <b>Daily projection<\/b>/);
+  assert.doesNotMatch(text, /\d{4}-\d{2}-\d{2}T|16\.7%/);
+  assert.equal(formatTime(now + 10800, now), 'in 3 h');
+  assert.equal(formatTime(now + 120, now), '12:02 UTC');
 });

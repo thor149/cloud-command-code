@@ -43,6 +43,9 @@ export function createStore(db, kv) {
       return true;
     },
     task(id) { return query('SELECT * FROM tasks WHERE id=?', id).first(); },
+    async setStatusMessage(id, messageId) {
+      await query('UPDATE tasks SET status_message_id=? WHERE id=?', messageId, id).run();
+    },
     async startTask(id, run, now) {
       return query(`UPDATE tasks SET status='running', started_at=?, run_id=?, run_url=?
         WHERE id=? AND status='queued' RETURNING *`, now, run.run_id, run.run_url, id).first();

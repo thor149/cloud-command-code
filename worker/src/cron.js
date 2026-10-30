@@ -1,5 +1,7 @@
+import { notifyResult } from './telegram.js';
+
 export async function runCron(deps) {
-  const { store, telegram, github, now } = deps;
+  const { store, github, now } = deps;
   const expired = await store.expired(now());
   for (const candidate of expired) {
     if (candidate.status === 'finishing') {
@@ -13,6 +15,6 @@ export async function runCron(deps) {
     const ended = await store.endTask(candidate, status, result, now());
     if (!ended) continue;
     if (ended.run_id) await github.cancel(ended);
-    await telegram.result(ended, result);
+    await notifyResult(deps, ended, result);
   }
 }
