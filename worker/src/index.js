@@ -24,7 +24,11 @@ export function configuration(env) {
     if (limits[window] != null && (!Number.isSafeInteger(limits[window]) || limits[window] <= 0)) throw new Error('Invalid limits');
   }
   if (!['edits', 'full'].includes(env.EDIT_MODE || 'edits')) throw new Error('Invalid EDIT_MODE');
-  return { repos, limits, model: env.DEFAULT_MODEL || null, effort: env.DEFAULT_EFFORT || null, editMode: env.EDIT_MODE || 'edits' };
+  // Opt-in is deliberate: missing/misspelled configuration must never start paid model work.
+  const execution = env.TASK_EXECUTION ?? 'paused';
+  if (!['paused', 'enabled'].includes(execution)) throw new Error('Invalid TASK_EXECUTION');
+  return { repos, limits, model: env.DEFAULT_MODEL || null, effort: env.DEFAULT_EFFORT || null,
+    editMode: env.EDIT_MODE || 'edits', execution };
 }
 
 export function dependencies(env) {

@@ -7,3 +7,4 @@ import './limits.test.js';
 import './transports-cron.test.js';
 import './format.test.js';
 import './telegram.test.js';
+import './execution.test.js';

@@ -1,6 +1,7 @@
 import { verify } from './auth.js';
 import { conversationKind, isActive } from './store.js';
 import { notifyResult, updateTaskStatus } from './telegram.js';
+import { PAUSED_MESSAGE } from './commands.js';
 
 export const MAX_SESSION_BYTES = 20 * 1024 * 1024;
 // Two 60,000-code-point strings can each use 12 JSON bytes per escaped surrogate pair.
@@ -75,6 +76,9 @@ export async function handleApi(request, deps) {
   const action = match[2];
   if (!action && request.method === 'GET') {
     if (task.status === 'cancelled') return json({ error: 'Cancelled' }, 410);
+    // Also protect tasks dispatched before the pause. Completed tasks remain readable for
+    // the trusted publisher; in-flight callbacks can still save results and session archives.
+    if (deps.config.execution !== 'enabled' && task.status === 'queued') return json({ error: PAUSED_MESSAGE }, 503);
     const conv = await store.getConversation(task.repo, conversationKind(task.kind));
     let session;
     try { session = await store.getSession(task, conv); }
@@ -91,6 +95,7 @@ export async function handleApi(request, deps) {
   let body;
   try { body = JSON.parse(new TextDecoder().decode(bytes)); } catch { return json({ error: 'Invalid JSON' }, 400); }
   if (action === 'started') {
+    if (deps.config.execution !== 'enabled') return json({ error: PAUSED_MESSAGE }, 503);
     if (!body || !Number.isSafeInteger(body.run_id) || body.run_id <= 0 || typeof body.run_url !== 'string'
       || body.run_url !== `https://github.com/${task.repo}/actions/runs/${body.run_id}`) return json({ error: 'Invalid run' }, 400);
     const started = await store.startTask(task.id, body, now());

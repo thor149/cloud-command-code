@@ -35,7 +35,7 @@ export function fixture(t, overrides = {}) {
   const env = { OWNER_ID: '42', TELEGRAM_WEBHOOK_SECRET: 'hook-secret', CCBOT_SECRET: 'test-secret',
     REPOS: JSON.stringify({ app: { repo: 'owner/app', base: 'main', writable: true, metered: true, workflow: 'ccbot.yml' },
       docs: { repo: 'owner/docs', base: 'trunk', writable: false, metered: false, workflow: 'docs.yml' } }),
-    DEFAULT_LIMITS: '{"hourly":60,"daily":180,"monthly":1800}', ...overrides };
+    DEFAULT_LIMITS: '{"hourly":60,"daily":180,"monthly":1800}', TASK_EXECUTION: 'enabled', ...overrides };
   let clock = Date.UTC(2026, 9, 15, 12) / 1000;
   const messages = [], results = [], dispatches = [], cancellations = [];
   const deps = { env, config: configuration(env), store: createStore(db, kv), now: () => clock,
