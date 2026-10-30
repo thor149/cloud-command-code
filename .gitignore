@@ -1,0 +1,9 @@
+.env
+projects.json
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+*.zip
+.agents/*.log
